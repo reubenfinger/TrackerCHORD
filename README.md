@@ -15,9 +15,16 @@ an Omnichord-style chord player with an MPC "16 Levels"-style velocity row for t
 Full controls and details: [`CHORD_MODE.md`](CHORD_MODE.md). The changes against tracker-ce are in
 [`chord-mode.patch`](chord-mode.patch).
 
-**Firmware:** [`firmware/PolyendTrackerCHORDS.ptf`](firmware/PolyendTrackerCHORDS.ptf), built for the original
-Tracker (MK66). Copy it into `/Firmware` on the SD card (the update bootloader needs a 24-character name) and
-keep the stock firmware there as the way back. Community firmware, not supported by Polyend; use at your own risk.
+### Download
+
+**[⬇ Download PolyendTrackerCHORDS.zip](https://github.com/reubenfinger/TrackerCHORD/raw/main/firmware/PolyendTrackerCHORDS.zip)**
+(firmware for the original Tracker, MK66). Or the bare image:
+[PolyendTrackerCHORDS.ptf](https://github.com/reubenfinger/TrackerCHORD/raw/main/firmware/PolyendTrackerCHORDS.ptf)
+(if your browser shows it as text, right-click the link and choose *Save Link As…*).
+
+To install: unzip, copy `PolyendTrackerCHORDS.ptf` into `/Firmware` on the SD card (keep the name: the update
+bootloader needs a 24-character name), keep the stock firmware there as the way back, and flash it from
+Config > Firmware. Community firmware, not supported by Polyend; use at your own risk.
 
 ---
 
