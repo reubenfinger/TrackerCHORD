@@ -1,7 +1,7 @@
 # Chord mode for Tracker CE
 
 An Omnichord-style chord player with an MPC "16 Levels"-style velocity row.
-Status: builds for the original Tracker as `PolyendTrackerCHRD16.ptf` (version 2: voice tracking,
+Status: builds for the original Tracker as `PolyendTrackerCHORDS.ptf` (version 2: voice tracking,
 Release / Gain, track and step display). Version 1 was tried on hardware; version 2 is not yet tested.
 
 ## Using it
