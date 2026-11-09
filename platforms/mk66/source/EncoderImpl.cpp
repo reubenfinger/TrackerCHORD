@@ -14,6 +14,11 @@ void EncoderImpl::setResolution(int resolution)
     encoderDriver.setResolution(resolution);
 }
 
+void EncoderImpl::setReadInterval(uint32_t intervalMs)
+{
+    readIntervalMs = intervalMs < 1 ? 1 : intervalMs;
+}
+
 void EncoderImpl::init()
 {
     encoderDriver.begin();
@@ -23,7 +28,7 @@ void EncoderImpl::init()
 
 void EncoderImpl::update()
 {
-    if ((millis() - encTimer) > 100)
+    if ((millis() - encTimer) > readIntervalMs)
     {
         encTimer = millis();
 

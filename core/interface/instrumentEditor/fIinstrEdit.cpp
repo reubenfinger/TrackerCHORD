@@ -983,6 +983,12 @@ static void functSwitchModule(uint8_t button)
 
 static void functSwitchMode()
 {
+    if (IE->buttons->isButtonPressed(interfaceButtonShift))
+    {
+        IE->eventFunct(eventActivateChordMode, IE, 0, 0);
+        return;
+    }
+
     mtPopups.hideInfoPopup();
     sequencer.stopManualNotes();
 

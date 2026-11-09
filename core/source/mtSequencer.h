@@ -897,6 +897,18 @@ class Sequencer
 
     void handleNoteOn(byte channel, byte pitch, int8_t volume, int16_t source);
     void handleNoteOff(byte channel, byte pitch, byte volume, int16_t source);
+
+    // Set by Chord mode around its own handleNoteOn() calls only:
+    // keep (and record) the played velocity even when recording velocity is off, and keep live
+    // recording of a sample instrument on sample tracks (never a MIDI track).
+    bool liveVelocityAlways = false;
+    bool liveRecSampleTracksOnly = false;
+    // Live recording limited to these tracks (-1 = all); the arming still applies.
+    // One track behaves like a single armed track (one lane); more spread notes across them.
+    int8_t liveRecFirstTrack = -1;
+    uint8_t liveRecTrackCount = 0;
+    // Play the note live but never record it (Chord mode records its arpeggio as one step).
+    bool livePreviewOnly = false;
     void updateTrackLengths(strPattern* pattern);
 
     uint8_t noMoreRecOpen();

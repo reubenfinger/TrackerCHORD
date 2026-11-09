@@ -156,6 +156,9 @@ class Encoder
   public:
     virtual void setAcceleration(int acceleration) = 0;
     virtual void setResolution(int resolution) = 0;
+    // How often the encoder is read, in ms (100 by default). Platforms that do not support
+    // changing it ignore the call.
+    virtual void setReadInterval([[maybe_unused]] uint32_t intervalMs) {}
 };
 
 class Timer

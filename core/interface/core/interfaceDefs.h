@@ -269,6 +269,7 @@ enum interfaceEvents
     eventToggleActiveModule,
 
     eventActivateImageViewer,
+    eventActivateChordMode,
     eventActivateGameModule,
 
     eventSetFileTransferMode,

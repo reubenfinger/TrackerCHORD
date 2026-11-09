@@ -9,6 +9,7 @@
 #include "core/songTimer.h"
 #include "core/titleBar.h"
 
+#include "chordMode/chordMode.h"
 #include "imageViewer/imageViewer.h"
 #include "instrumentEditor/instrumentEditor.h"
 #include "masterParams/masterParams.h"
@@ -567,6 +568,15 @@ void interfaceEnvents(uint8_t event, void* param1, void* param2, void* param3)
     {
         case eventSwitchModule:
         {
+            // Shift + I.Param opens chord mode from any module
+            if (*((uint8_t*)param2) == interfaceButtonParams && (hModule)param1 != &chordMode &&
+                mtInterface.getPlatform()->getButtons()->isButtonPressed(interfaceButtonShift))
+            {
+                mtInterface.deactivateModule((hModule)param1);
+                mtInterface.activateModule(&chordMode, 0);
+                break;
+            }
+
             // param1 = uchwyt do modułu, param2 = index przycisku
             mtInterface.switchModuleByButton(
               (hModule)param1, *((uint8_t*)param2), param3 == nullptr ? 0 : *((uint32_t*)param3));
@@ -581,6 +591,12 @@ void interfaceEnvents(uint8_t event, void* param1, void* param2, void* param3)
         }
         case eventActivateGameModule:
         {
+            break;
+        }
+        case eventActivateChordMode:
+        {
+            mtInterface.deactivateModule((hModule)param1);
+            mtInterface.activateModule(&chordMode, 0);
             break;
         }
         case eventActivateImageViewer:

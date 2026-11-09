@@ -8,12 +8,14 @@ class EncoderImpl : Encoder
   public:
     virtual void setAcceleration(int acceleration) override;
     virtual void setResolution(int resolution) override;
+    virtual void setReadInterval(uint32_t intervalMs) override;
 
     void init();
     void update();
 
   private:
     uint32_t encTimer;
+    uint32_t readIntervalMs = 100;
     cEncoder encoderDriver;
 };
 

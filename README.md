@@ -1,3 +1,23 @@
+# TrackerCHORD: Chord mode for Polyend Tracker CE
+
+This is [Polyend Tracker Community Edition](https://github.com/polyend/tracker-ce) with **Chord mode** added:
+an Omnichord-style chord player with an MPC "16 Levels"-style velocity row for the original Polyend Tracker.
+
+- **Shift + I.Param** opens and closes it.
+- Pad rows 1-3 are chord buttons (12 roots in Omnichord order, major / minor / 7th; Shift for sus4 / m7 / maj7),
+  row 4 is a strum plate or 12 velocity levels, and the jog strums, sets velocity or sweeps an effect.
+- Chord pads play as a block chord, a strum, the sequencer's own arpeggiator, or just select the chord.
+- Everything records into the sequencer (arpeggios as one Chord + Arp step), on armed tracks from the selected one.
+
+Full controls and details: [`CHORD_MODE.md`](CHORD_MODE.md). The changes against tracker-ce are in
+[`chord-mode.patch`](chord-mode.patch).
+
+**Firmware:** [`firmware/PolyendTrackerCHRD16.ptf`](firmware/PolyendTrackerCHRD16.ptf), built for the original
+Tracker (MK66). Copy it into `/Firmware` on the SD card (the update bootloader needs a 24-character name) and
+keep the stock firmware there as the way back. Community firmware, not supported by Polyend; use at your own risk.
+
+---
+
 # Polyend Tracker Community Edition (CE)
 
 Welcome to the **Polyend Tracker Community Edition** repository!

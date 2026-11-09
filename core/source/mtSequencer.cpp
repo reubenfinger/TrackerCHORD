@@ -2554,7 +2554,7 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
   int8_t velocity, // 0-127, historyczna wartosc specjalna -1 jest tozsama z 127
   int16_t source)  // nr pada, jesli midi to source = nuta+100,
 {
-    if (!recVelocity() || velocity < 0)
+    if ((!recVelocity() && !liveVelocityAlways) || velocity < 0)
     {
         velocity = 127;
     }
@@ -2620,11 +2620,18 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
             engine.setLastUsedVoice(sel->firstTrack);
         }
     }
-    else if (isRec())
+    else if (isRec() && !livePreviewOnly)
     {
         int8_t singleArmedTrack = getSingleArmedTrack();
         int startTrack = (singleArmedTrack >= 0) ? singleArmedTrack : getActualTrack();
         int endTrack = (singleArmedTrack >= 0) ? (singleArmedTrack + 1) : kAllTracks;
+        bool tracksOverride = liveRecFirstTrack >= 0 && liveRecTrackCount > 0;
+        if (tracksOverride)
+        {
+            singleArmedTrack = (liveRecTrackCount == 1) ? liveRecFirstTrack : -1;
+            startTrack = liveRecFirstTrack;
+            endTrack = std::min<int>(kAllTracks, liveRecFirstTrack + liveRecTrackCount);
+        }
 
         if (singleArmedTrack >= 0)
         {
@@ -2666,6 +2673,12 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
 
         for (int tr = startTrack; tr < endTrack; tr++)
         {
+            if (liveRecSampleTracksOnly && !isSampleTrack(tr) &&
+                isSampleInstrument(mtProject.values.lastUsedInstrument))
+            {
+                continue;
+            }
+
             uint8_t destinationStep = isAnticipatedBeat1 ? 0 : getDestRecordingStep(tr, !recMicrotiming());
 
             strPattern::strTrack::strStep* step = &currentPattern->track[tr].step[destinationStep];
@@ -2681,7 +2694,8 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
              * spr warunek wejscia w track
              */
             bool isPrerollPreviewOnly = player.preRecMetronomeActive && !isAnticipatedBeat1;
-            if ((isPrerollPreviewOnly || (step->isNoteEmpty() && !step->hasAnyFx())) && isRecArmedOnTrack(tr))
+            if ((isPrerollPreviewOnly || (step->isNoteEmpty() && !step->hasAnyFx())) &&
+                isRecArmedOnTrack(tr))
             {
                 if (singleArmedTrack < 0 && player.track[tr].noteOpen && !padInstrumentEdit)
                 {
@@ -2738,7 +2752,7 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
                         wasChangeInPattern = true;
                     }
 
-                    if (recVelocity())
+                    if (recVelocity() || liveVelocityAlways)
                     {
                         step->volume = velocityToVolume(velocity);
                         wasChangeInPattern = true;
@@ -2841,7 +2855,7 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
 
                     wasChangeInPattern = true;
 
-                    if (recVelocity())
+                    if (recVelocity() || liveVelocityAlways)
                     {
                         step->volume = velocityToVolume(velocity);
                     }
@@ -2895,9 +2909,13 @@ void Sequencer::handleNoteOff(byte channel, // pochodzenie grida np. GRID_OUTSID
             }
         }
     }
-    else if (isRec())
+    else if (isRec() && !livePreviewOnly)
     {
         int8_t singleArmedTrack = getSingleArmedTrack();
+        if (liveRecFirstTrack >= 0 && liveRecTrackCount > 0)
+        {
+            singleArmedTrack = (liveRecTrackCount == 1) ? liveRecFirstTrack : -1;
+        }
         if (singleArmedTrack >= 0)
         {
             for (uint8_t i = 0; i < liveRecHeldNotesCount; i++)
