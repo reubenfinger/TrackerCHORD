@@ -1,17 +1,12 @@
 #include "chordMode.h"
 
-#include <stdio.h>
-#include <string.h>
-
 #include "core/interface.h"
-#include "core/interfaceMenuPopup.h"
 #include "core/interfacePopups.h"
 #include "elapsedMillis.h"
 #include "fileManager.h"
 #include "mtAudioEngine.h"
 #include "mtChordDefs.h"
 #include "mtConfig.h"
-#include "mtPadBoard.h"
 #include "mtPadsBacklight.h"
 #include "mtSequencer.h"
 #include "Platform.h"
@@ -26,6 +21,27 @@ static elapsedMillis jogTimer;
 static elapsedMillis clockMs; // running ms clock for strum ring times
 
 static constexpr uint8_t kNoVoice = 255;
+
+// Chord mode's hooks into the sequencer, set only around its own note-on / note-off calls:
+// keep (and record) the played velocity, keep a sample instrument's recording on sample tracks,
+// limit recording to the given lanes, and optionally play without recording.
+static void setSequencerHooks(bool on, int8_t recFirst = -1, uint8_t recCount = 0, bool previewOnly = false)
+{
+    sequencer.liveVelocityAlways = on;
+    sequencer.liveRecSampleTracksOnly = on;
+    sequencer.liveRecFirstTrack = on ? recFirst : -1;
+    sequencer.liveRecTrackCount = on ? recCount : 0;
+    sequencer.livePreviewOnly = on && previewOnly;
+}
+
+static bool shiftHeld()
+{
+    return CM->buttons->isButtonPressed(interfaceButtonShift);
+}
+
+// Arp effect rates (Sequencer::arpPeriod_*): a note every N steps, or N notes per step.
+static const uint8_t arpPeriodSteps[cChordMode::kArpRates] = { 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0 };
+static const uint8_t arpNotesPerStep[cChordMode::kArpRates] = { 0, 0, 0, 0, 0, 0, 2, 3, 4, 6, 8 };
 
 //==============================================================================================
 // Chord tables
@@ -112,7 +128,7 @@ void cChordMode::update()
     // strum on press: the next note of the roll
     if (rollPos < rollCount && static_cast<int32_t>(now - rollNextMs) >= 0)
     {
-        playStrumNote(rollNotes[rollPos++], levelVelocity(), rollPreviewOnly);
+        playStrumNote(rollNotes[rollPos++], noteVelocity, rollPreviewOnly);
         rollNextMs = now + kRollSpacingMs;
     }
 
@@ -121,9 +137,6 @@ void cChordMode::update()
     // step. While the pattern plays it follows the sequencer's steps; when stopped, the tempo.
     if (arpRunning)
     {
-        static const uint8_t periodSteps[kArpRates] = { 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0 };
-        static const uint8_t notesPerStep[kArpRates] = { 0, 0, 0, 0, 0, 0, 2, 3, 4, 6, 8 };
-
         bool boundary = false;
         uint32_t stepLength = sequencer.isPlay() ? stepMs : freeStepMs();
 
@@ -166,28 +179,17 @@ void cChordMode::update()
                 }
             }
 
-            if (arpRunning && arpStepCount >= 0)
+            uint8_t n = arpPeriodSteps[arpRate];
+            if (arpRunning && arpStepCount >= 0 && (n == 0 || arpStepCount % n == 0))
             {
-                uint8_t n = periodSteps[arpRate];
-                if (n > 0)
-                {
-                    if (arpStepCount % n == 0)
-                    {
-                        arpStep();
-                    }
-                }
-                else
-                {
-                    arpStep();
-                    arpSubLeft = static_cast<uint8_t>(notesPerStep[arpRate] - 1);
-                    arpSubMs = now + stepLength / notesPerStep[arpRate];
-                }
+                arpStep();
+                scheduleArpSubNotes(now);
             }
         }
         else if (arpRunning && arpSubLeft > 0 && static_cast<int32_t>(now - arpSubMs) >= 0)
         {
             arpSubLeft--;
-            arpSubMs += stepLength / notesPerStep[arpRate];
+            arpSubMs += stepLength / arpNotesPerStep[arpRate];
             arpStep();
         }
     }
@@ -365,16 +367,22 @@ const char* cChordMode::rootName() const
     return hasChord() ? pitchClassNames[static_cast<uint8_t>(currentRootPc)] : "";
 }
 
-uint8_t cChordMode::levelVelocity() const
-{
-    return velocity;
-}
-
 // A level 1..12 (Up / Down, the Levels row) sets the velocity to that step of 127.
 void cChordMode::setLevel(uint8_t newLevel)
 {
     level = newLevel;
-    velocity = static_cast<uint8_t>((127 * level + kLevels - 1) / kLevels);
+    noteVelocity = static_cast<uint8_t>((127 * level + kLevels - 1) / kLevels);
+}
+
+// The velocity set directly (jog Velocity mode); the level follows it.
+void cChordMode::setVelocity(uint8_t newVelocity)
+{
+    noteVelocity = newVelocity;
+    level = static_cast<uint8_t>((noteVelocity * kLevels + 63) / 127);
+    if (level < 1)
+    {
+        level = 1;
+    }
 }
 
 uint8_t cChordMode::scaled(uint8_t velocity) const
@@ -446,16 +454,31 @@ uint8_t cChordMode::armedLanes() const
     return lanes;
 }
 
+// Past the middle of the current step (while the pattern plays)?
+bool cChordMode::lateInStep() const
+{
+    return sequencer.isPlay() && (nowMs() - seenPosMs) * 2 > stepMs;
+}
+
 // The step a recording made now lands on: this one, or the next if we are past its middle.
 int16_t cChordMode::recordPosition() const
 {
-    int16_t pos = sequencer.getActualPos();
-    if (sequencer.isPlay() && (nowMs() - seenPosMs) * 2 > stepMs)
-    {
-        pos = static_cast<int16_t>(pos + 1);
-    }
+    int16_t pos = static_cast<int16_t>(sequencer.getActualPos() + (lateInStep() ? 1 : 0));
     int16_t length = sequencer.getPatternLength();
     return static_cast<int16_t>(length > 0 ? pos % length : 0);
+}
+
+// A step of the current pattern, the index wrapped round the pattern length (nullptr if none).
+Sequencer::strPattern::strTrack::strStep* cChordMode::stepAt(int8_t track, int16_t stepIndex) const
+{
+    Sequencer::strPattern* pattern = sequencer.getActualPattern();
+    int16_t length = sequencer.getPatternLength();
+    if (pattern == nullptr || length <= 0 || track < 0)
+    {
+        return nullptr;
+    }
+    stepIndex = static_cast<int16_t>(((stepIndex % length) + length) % length);
+    return &pattern->track[track].step[stepIndex];
 }
 
 cChordMode::strVoice cChordMode::startVoice(uint8_t note,
@@ -476,17 +499,9 @@ cChordMode::strVoice cChordMode::startVoice(uint8_t note,
     uint8_t previousVoice = engine.getLastUsedVoice();
     engine.setLastUsedVoice(kNoVoice);
 
-    sequencer.liveVelocityAlways = true;
-    sequencer.liveRecSampleTracksOnly = true;
-    sequencer.liveRecFirstTrack = recFirst;
-    sequencer.liveRecTrackCount = recCount;
-    sequencer.livePreviewOnly = previewOnly;
+    setSequencerHooks(true, recFirst, recCount, previewOnly);
     sequencer.handleNoteOn(Sequencer::GRID_OUTSIDE_PATTERN, note, static_cast<int8_t>(scaled(velocity)), source);
-    sequencer.liveVelocityAlways = false;
-    sequencer.liveRecSampleTracksOnly = false;
-    sequencer.liveRecFirstTrack = -1;
-    sequencer.liveRecTrackCount = 0;
-    sequencer.livePreviewOnly = false;
+    setSequencerHooks(false);
 
     uint8_t usedVoice = engine.getLastUsedVoice();
     if (usedVoice < kSampleTracks)
@@ -518,13 +533,9 @@ void cChordMode::endVoice(strVoice& voice)
         return;
     }
 
-    sequencer.liveRecFirstTrack = voice.recFirst;
-    sequencer.liveRecTrackCount = voice.recCount;
-    sequencer.livePreviewOnly = voice.previewOnly;
+    setSequencerHooks(true, voice.recFirst, voice.recCount, voice.previewOnly);
     sequencer.handleNoteOff(Sequencer::GRID_OUTSIDE_PATTERN, voice.note, 0, voice.source);
-    sequencer.liveRecFirstTrack = -1;
-    sequencer.liveRecTrackCount = 0;
-    sequencer.livePreviewOnly = false;
+    setSequencerHooks(false);
 
     if (voice.track >= 0 && voice.track < kSampleTracks)
     {
@@ -771,44 +782,34 @@ uint32_t cChordMode::freeStepMs() const
     return static_cast<uint32_t>(60000.0f / tempo / 4.0f);
 }
 
-// Recording: write the whole arpeggio as one step on the selected track - root note, the Chord
-// effect (the chord) and the Arp effect (direction and rate) - so the sequencer plays it back
-// itself on one lane, with no extra tracks or voices.
-// Write root + Chord + Arp effects as one step on the first armed lane.
-bool cChordMode::writeChordStep(int16_t stepIndex, uint8_t arpValue, int8_t& trackOut)
+// Recording: the whole arpeggio as one step on the first armed lane - root note, the Chord effect
+// (the chord) and the Arp effect (direction and rate) - so the sequencer's own arpeggiator plays it
+// back on one lane, with no extra tracks or voices.
+void cChordMode::recordArpStep(int16_t stepIndex)
 {
     int8_t track;
     uint8_t count;
     recLanes(1, track, count);
-    if (count == 0 || track < 0 || !hasChord())
+    Sequencer::strPattern::strTrack::strStep* step = stepAt(track, stepIndex);
+    if (count == 0 || step == nullptr || !hasChord())
     {
-        return false;
+        return;
     }
-
-    Sequencer::strPattern* pattern = sequencer.getActualPattern();
-    int16_t length = sequencer.getPatternLength();
-    if (pattern == nullptr || length <= 0)
-    {
-        return false;
-    }
-    stepIndex = static_cast<int16_t>(((stepIndex % length) + length) % length);
 
     newFileManager.storePatternUndoRevision();
-
-    Sequencer::strPattern::strTrack::strStep& step = pattern->track[track].step[stepIndex];
-    step.note = static_cast<int8_t>(12 * octave + currentRootPc);
-    step.instrument = mtProject.values.lastUsedInstrument;
-
-    step.volume = recordVolume();
-
-    step.fx[0].type = sequencer.fx.FX_TYPE_MIDI_CHORD;
-    step.fx[0].value = currentChordIdx;
-    step.fx[1].type = sequencer.fx.FX_TYPE_ARP;
-    step.fx[1].value = arpValue;
-
+    step->note = static_cast<int8_t>(12 * octave + currentRootPc);
+    step->instrument = mtProject.values.lastUsedInstrument;
+    step->volume = recordVolume();
+    step->fx[0].type = sequencer.fx.FX_TYPE_MIDI_CHORD;
+    step->fx[0].value = currentChordIdx;
+    step->fx[1].type = sequencer.fx.FX_TYPE_ARP;
+    step->fx[1].value = static_cast<uint8_t>(arpPattern * sequencer.fx.arpPeriodsCount + arpRate + 1);
     newFileManager.setActualPatternStructChanged();
-    trackOut = track;
-    return true;
+
+    arpRecording = true;
+    arpRecTrack = track;
+    arpRecStep = static_cast<int16_t>(stepIndex % sequencer.getPatternLength());
+    arpLeftRecStep = false;
 }
 
 // Chord mode velocity (level x gain) as a step volume (0..100). Always recorded: what Chord mode
@@ -817,66 +818,34 @@ int8_t cChordMode::recordVolume() const
 {
     // as the sequencer does for live notes: the velocity is scaled by the instrument's own
     // velocity setting before it becomes a volume, so a recorded step sounds as loud as live
-    int velocity = scaled(levelVelocity());
     int instrumentVelo = sequencer.getInstrumentVelo(mtProject.values.lastUsedInstrument);
-    velocity = (velocity * instrumentVelo + 63) / 127;
-    return static_cast<int8_t>((velocity * 100 + 63) / 127);
+    int played = (scaled(noteVelocity) * instrumentVelo + 63) / 127;
+    return static_cast<int8_t>((played * 100 + 63) / 127);
 }
 
 // One note on an empty step (an occupied step is left alone, as live recording does).
 bool cChordMode::writeNoteStep(int8_t track, int16_t stepIndex, uint8_t note, int8_t volume, int8_t micromove)
 {
-    Sequencer::strPattern* pattern = sequencer.getActualPattern();
-    int16_t length = sequencer.getPatternLength();
-    if (pattern == nullptr || length <= 0 || track < 0)
+    Sequencer::strPattern::strTrack::strStep* step = stepAt(track, stepIndex);
+    if (step == nullptr || !step->isNoteEmpty() || step->hasAnyFx())
     {
         return false;
     }
-    stepIndex = static_cast<int16_t>(((stepIndex % length) + length) % length);
-    Sequencer::strPattern::strTrack::strStep& step = pattern->track[track].step[stepIndex];
-    if (!step.isNoteEmpty() || step.hasAnyFx())
-    {
-        return false;
-    }
-    step.note = static_cast<int8_t>(note);
-    step.instrument = mtProject.values.lastUsedInstrument;
-    step.volume = volume;
-    step.micromove = micromove;
+    step->note = static_cast<int8_t>(note);
+    step->instrument = mtProject.values.lastUsedInstrument;
+    step->volume = volume;
+    step->micromove = micromove;
     return true;
 }
 
 void cChordMode::writeOffStep(int8_t track, int16_t stepIndex)
 {
-    Sequencer::strPattern* pattern = sequencer.getActualPattern();
-    int16_t length = sequencer.getPatternLength();
-    if (pattern == nullptr || length <= 0 || track < 0)
+    Sequencer::strPattern::strTrack::strStep* step = stepAt(track, stepIndex);
+    if (step != nullptr && step->isNoteEmpty())
     {
-        return;
-    }
-    stepIndex = static_cast<int16_t>(((stepIndex % length) + length) % length);
-    Sequencer::strPattern::strTrack::strStep& step = pattern->track[track].step[stepIndex];
-    if (step.isNoteEmpty())
-    {
-        step.note = Sequencer::STEP_NOTE_OFF_DEFAULT;
+        step->note = Sequencer::STEP_NOTE_OFF_DEFAULT;
         newFileManager.setActualPatternStructChanged();
     }
-}
-
-// Recording: the whole arpeggio as one step, so the sequencer's own arpeggiator plays it back.
-void cChordMode::recordArpStep(int16_t stepIndex)
-{
-    int8_t track;
-    uint8_t value = static_cast<uint8_t>(arpPattern * sequencer.fx.arpPeriodsCount + arpRate + 1);
-    if (!writeChordStep(stepIndex, value, track))
-    {
-        return;
-    }
-    stepIndex = static_cast<int16_t>(stepIndex % sequencer.getPatternLength());
-
-    arpRecording = true;
-    arpRecTrack = track;
-    arpRecStep = stepIndex;
-    arpLeftRecStep = false;
 }
 
 // Recording: the arpeggio stopped - end the recorded step with a note-off on the step it stopped on.
@@ -893,61 +862,47 @@ void cChordMode::recordArpOff()
     arpRecording = false;
 }
 
+// Rates faster than a step: the step's other notes, spread evenly after the one just played.
+void cChordMode::scheduleArpSubNotes(uint32_t now)
+{
+    uint8_t perStep = arpNotesPerStep[arpRate];
+    arpSubLeft = perStep > 1 ? static_cast<uint8_t>(perStep - 1) : 0;
+    if (arpSubLeft > 0)
+    {
+        arpSubMs = now + (sequencer.isPlay() ? stepMs : freeStepMs()) / perStep;
+    }
+}
+
+// Start (or, while running, restart with the new chord / settings). A press in the first half of a
+// step plays at once; a later press waits for the next step, which is also where a recording puts it.
 void cChordMode::startArp(uint8_t pad)
 {
     arpPad = pad;
-
-    // where the arpeggio starts: a press in the first half of a step plays at once, a later
-    // press waits for the next step (that is also where a recording puts it)
-    bool late = sequencer.isPlay() && (nowMs() - seenPosMs) * 2 > stepMs;
+    bool late = lateInStep();
 
     if (sequencer.isRec())
     {
-        int16_t pos = sequencer.getActualPos();
-        recordArpStep(static_cast<int16_t>(late ? pos + 1 : pos));
+        recordArpStep(recordPosition());
     }
 
-    if (arpRunning || arpHandedOver)
+    if (!arpActive())
     {
-        // a new chord while running: the next note uses it; a recording gets a new step
-        arpRunning = true;
-        arpHandedOver = false;
-        arpIndex = -1;
-        arpSubLeft = 0;
-        if (!late)
-        {
-            arpStepCount = 0;
-            arpStep();
-        }
-        else
-        {
-            arpStepCount = -1;
-        }
-        return;
+        arpLastPos = sequencer.getActualPos();
+        arpNextMs = nowMs() + freeStepMs();
     }
-
     arpRunning = true;
     arpHandedOver = false;
     arpIndex = -1;
     arpSubLeft = 0;
-    arpLastPos = sequencer.getActualPos();
-    arpNextMs = nowMs() + freeStepMs();
 
     if (late)
     {
         arpStepCount = -1; // the next step boundary counts as step 0 and plays the first note
         return;
     }
-
     arpStepCount = 0;
     arpStep();
-    static const uint8_t notesPerStep[kArpRates] = { 0, 0, 0, 0, 0, 0, 2, 3, 4, 6, 8 };
-    if (notesPerStep[arpRate] > 0)
-    {
-        uint32_t stepLength = sequencer.isPlay() ? stepMs : freeStepMs();
-        arpSubLeft = static_cast<uint8_t>(notesPerStep[arpRate] - 1);
-        arpSubMs = nowMs() + stepLength / notesPerStep[arpRate];
-    }
+    scheduleArpSubNotes(nowMs());
 }
 
 void cChordMode::stopArp()
@@ -1002,24 +957,21 @@ void cChordMode::arpStep()
     strVoice previous = arpVoice;
     arpSourceB = !arpSourceB;
     int16_t source = static_cast<int16_t>(kSrcArp + (arpSourceB ? 1 : 0));
-    uint8_t arpNote = tones[arpIndex];
-    bool previewOnly = sequencer.isRec();
-
-    if (previous.on && previous.note == arpNote)
-    {
-        endVoice(previous);
-    }
-    arpVoice = startVoice(arpNote, levelVelocity(), source, -1, 0, previewOnly);
-    endVoice(previous);
-    if (!arpVoice.on)
-    {
-        arpVoice = startVoice(arpNote, levelVelocity(), source, -1, 0, previewOnly);
-    }
+    handover(&previous, 1, &tones[arpIndex], &source, 1, noteVelocity, &arpVoice, 1, sequencer.isRec());
 }
 
 //==============================================================================================
 // Pad, jog and key actions
 //==============================================================================================
+
+// Let go of the chord altogether: arpeggio, strum on press, ringing strum notes, selection.
+void cChordMode::dropChord()
+{
+    stopArp();
+    stopRoll();
+    releaseStrumNotes();
+    clearChord();
+}
 
 void cChordMode::clearChord()
 {
@@ -1047,7 +999,7 @@ void cChordMode::chordPadPress(uint8_t pad, bool alt)
     {
         case kPlayBlock:
             stopRoll();
-            playChordBlock(levelVelocity());
+            playChordBlock(noteVelocity);
             chordBlockOwnerPad = pad;
             break;
 
@@ -1110,7 +1062,7 @@ void cChordMode::strumPadPress(uint8_t column)
     {
         return;
     }
-    playStrumNote(static_cast<uint8_t>(note), levelVelocity());
+    playStrumNote(static_cast<uint8_t>(note), noteVelocity);
     jogPos = static_cast<int8_t>(column);
 }
 
@@ -1126,7 +1078,7 @@ void cChordMode::levelPadPress(uint8_t pad)
         }
         else if (chordPlay != kPlayArp)
         {
-            playChordBlock(levelVelocity());
+            playChordBlock(noteVelocity);
             chordBlockOwnerPad = pad;
         }
         else if (arpActive() && sequencer.isRec())
@@ -1156,7 +1108,7 @@ void cChordMode::jog(int16_t value)
     }
     int8_t dir = value > 0 ? 1 : -1;
 
-    if (buttons->isButtonPressed(interfaceButtonShift))
+    if (shiftHeld())
     {
         cycleJogMode(dir);
     }
@@ -1194,12 +1146,6 @@ static const uint8_t jogFxTypes[cChordMode::kJogFxTypes] = {
     Sequencer::strFxConsts::FX_TYPE_BIT_DEPTH,
 };
 
-uint8_t cChordMode::fxType(uint8_t slot) const
-{
-    return fxCustomType[slot] >= 0 ? static_cast<uint8_t>(fxCustomType[slot])
-                                   : jogFxTypes[fxTypeIdx[slot] % kJogFxTypes];
-}
-
 const char* cChordMode::fxShortName(uint8_t slot) const
 {
     return interfaceGlobals.fxShortNames[interfaceGlobals.fxIdToName(fxType(slot))];
@@ -1211,18 +1157,7 @@ void cChordMode::fxPicked(uint8_t slot, uint8_t type)
 {
     clearFxLive(slot);
     fxSlot = slot;
-    fxCustomType[slot] = -1;
-    for (uint8_t i = 0; i < kJogFxTypes; i++)
-    {
-        if (jogFxTypes[i] == type)
-        {
-            fxTypeIdx[slot] = i;
-        }
-    }
-    if (jogFxTypes[fxTypeIdx[slot]] != type)
-    {
-        fxCustomType[slot] = type;
-    }
+    fxTypeId[slot] = type;
     fxValue[slot] = -1;
     jogMode = kJogFx;
 }
@@ -1235,40 +1170,41 @@ void cChordMode::cycleJogMode(int8_t delta)
     }
     jogMode = static_cast<uint8_t>((jogMode + kJogModes + delta) % kJogModes);
     jogStarted = false;
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 // Velocity mode: two per click, no notes. The level (Up / Down, Levels row) follows it.
 void cChordMode::jogVelocity(int16_t value)
 {
-    int next = velocity + 2 * value;
-    velocity = static_cast<uint8_t>(next < 1 ? 1 : (next > 127 ? 127 : next));
-    level = static_cast<uint8_t>((velocity * kLevels + 63) / 127);
-    if (level < 1)
-    {
-        level = 1;
-    }
+    setVelocity(static_cast<uint8_t>(clamp<int>(noteVelocity + 2 * value, 1, 127)));
     showInfo();
     lightUpPadBoard();
 }
 
+// F3 + jog: the next / previous effect in the jog list (from an effect not in the list: the first).
 void cChordMode::changeFxType(int8_t delta)
 {
+    int index = -1;
+    for (uint8_t i = 0; i < kJogFxTypes; i++)
+    {
+        if (jogFxTypes[i] == fxTypeId[fxSlot])
+        {
+            index = i;
+        }
+    }
+    index = index < 0 ? 0 : (index + kJogFxTypes + delta) % kJogFxTypes;
+
     clearFxLive(fxSlot);
-    fxCustomType[fxSlot] = -1;
-    fxTypeIdx[fxSlot] = static_cast<uint8_t>((fxTypeIdx[fxSlot] + kJogFxTypes + delta) % kJogFxTypes);
+    fxTypeId[fxSlot] = jogFxTypes[index];
     fxValue[fxSlot] = -1;
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 // F3 tap: the jog drives the other slot (both keep their effect, value and what is heard)
 void cChordMode::toggleFxSlot()
 {
     fxSlot = fxSlot ? 0 : 1;
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 // FX mode: about two turns of the jog cover the effect's whole range. The jog sets the target;
@@ -1400,15 +1336,12 @@ void cChordMode::recordFxValue()
     int8_t lane;
     uint8_t count;
     recLanes(1, lane, count);
-    Sequencer::strPattern* pattern = sequencer.getActualPattern();
-    if (lane < 0 || count == 0 || pattern == nullptr || fxValue[fxSlot] < 0)
+    Sequencer::strPattern::strTrack::strStep* step = stepAt(lane, recordPosition());
+    if (count == 0 || step == nullptr || fxValue[fxSlot] < 0)
     {
         return;
     }
-
-    int16_t pos = recordPosition();
-    Sequencer::strPattern::strTrack::strStep& step = pattern->track[lane].step[pos];
-    uint8_t held = step.fx[fxSlot].type;
+    uint8_t held = step->fx[fxSlot].type;
     if (held == sequencer.fx.FX_TYPE_MIDI_CHORD || held == sequencer.fx.FX_TYPE_ARP)
     {
         return;
@@ -1419,8 +1352,8 @@ void cChordMode::recordFxValue()
         newFileManager.storePatternUndoRevision();
         fxUndoStored = true;
     }
-    step.fx[fxSlot].type = fxType();
-    step.fx[fxSlot].value = static_cast<uint8_t>(fxValue[fxSlot]);
+    step->fx[fxSlot].type = fxType();
+    step->fx[fxSlot].value = static_cast<uint8_t>(fxValue[fxSlot]);
     newFileManager.setActualPatternStructChanged();
 }
 
@@ -1451,14 +1384,13 @@ void cChordMode::jogStrum(int16_t value)
 
     if (dt > 300 || jogMode == kJogStrum)
     {
-        jogSmoothVelocity = levelVelocity(); // Strum mode: always the current velocity
+        jogSmoothVelocity = noteVelocity; // Strum mode: always the current velocity
     }
     else
     {
         jogSmoothVelocity = static_cast<int16_t>((jogSmoothVelocity * 2 + target + 1) / 3);
     }
-    uint8_t velocity = static_cast<uint8_t>(clamp<int>(jogSmoothVelocity, 1, 127));
-    lastJogVelocity = velocity;
+    lastJogVelocity = static_cast<uint8_t>(clamp<int>(jogSmoothVelocity, 1, 127));
 
     if (steps > 3)
     {
@@ -1485,7 +1417,7 @@ void cChordMode::jogStrum(int16_t value)
         int16_t note = strumNote(static_cast<uint8_t>(jogPos));
         if (note >= 0)
         {
-            playStrumNote(static_cast<uint8_t>(note), velocity);
+            playStrumNote(static_cast<uint8_t>(note), lastJogVelocity);
         }
     }
 
@@ -1502,8 +1434,7 @@ void cChordMode::toggleRowMode()
 {
     rowMode = (rowMode == kRowStrum) ? kRowLevels : kRowStrum;
     releaseChordBlock();
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
     lightUpPadBoard();
 }
 
@@ -1541,13 +1472,9 @@ void cChordMode::toggleLatch()
     latch = !latch;
     if (!latch && hasChord() && !currentChordPadHeld)
     {
-        stopArp();
-        stopRoll();
-        releaseStrumNotes();
-        clearChord(); // its pad is no longer held
+        dropChord(); // its pad is no longer held
     }
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
     lightUpPadBoard();
 }
 
@@ -1557,8 +1484,7 @@ void cChordMode::cycleChordPlay()
     stopArp();
     stopRoll();
     releaseChordBlock();
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 void cChordMode::cycleStrumVoices()
@@ -1572,15 +1498,13 @@ void cChordMode::cycleStrumVoices()
     {
         strumNext = 0;
     }
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 void cChordMode::cycleChordVoices()
 {
     chordVoiceLimit = static_cast<uint8_t>(chordVoiceLimit >= 4 ? 2 : chordVoiceLimit + 1); // 2 3 4 2 ...
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 // While recording a running arpeggio, a new direction or rate is written as a new step at that
@@ -1589,13 +1513,11 @@ void cChordMode::cycleChordVoices()
 void cChordMode::cycleArpPattern()
 {
     arpPattern = static_cast<uint8_t>((arpPattern + 1) % kArpPatterns);
-    arpDir = 1;
     if (arpActive() && sequencer.isRec() && hasChord())
     {
         startArp(arpPad);
     }
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 void cChordMode::cycleArpRate()
@@ -1605,29 +1527,25 @@ void cChordMode::cycleArpRate()
     {
         startArp(arpPad);
     }
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 void cChordMode::cycleReleaseMode()
 {
     releaseMode = static_cast<uint8_t>((releaseMode + 1) % kReleaseModes);
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 void cChordMode::cycleRing()
 {
     ringMode = static_cast<uint8_t>((ringMode + 1) % kRingModes);
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 void cChordMode::cycleGain()
 {
     gain = (gain == 100) ? 75 : (gain == 75) ? 50 : 100;
-    showFunctionLabels();
-    showInfo();
+    refreshScreen();
 }
 
 // The selected track: where live notes start looking for a free track, and where recording starts.
@@ -1645,6 +1563,12 @@ void cChordMode::changeTrack(int8_t delta)
         sendSelection();
     }
     showTrackLabel();
+}
+
+void cChordMode::refreshScreen()
+{
+    showFunctionLabels();
+    showInfo();
 }
 
 void cChordMode::setShiftLabels(bool shift)
@@ -1676,7 +1600,7 @@ static void functPads(uint8_t pad, uint8_t state, [[maybe_unused]] int16_t velo)
         if (pressed)
         {
             padsBacklight.setFrontLayer(1, mtConfig.values.padsLightFront, pad);
-            CM->chordPadPress(pad, CM->buttons->isButtonPressed(interfaceButtonShift));
+            CM->chordPadPress(pad, shiftHeld());
         }
         else
         {
@@ -1750,7 +1674,7 @@ static void functActionButton(uint8_t button, uint8_t state)
 {
     if (button == 5) // F6: hold + jog changes the track; Shift + F6: arpeggio pattern
     {
-        if (state == buttonPress && CM->buttons->isButtonPressed(interfaceButtonShift))
+        if (state == buttonPress && shiftHeld())
         {
             CM->cycleArpPattern();
         }
@@ -1765,7 +1689,7 @@ static void functActionButton(uint8_t button, uint8_t state)
         return;
     }
 
-    bool shift = CM->buttons->isButtonPressed(interfaceButtonShift);
+    bool shift = shiftHeld();
 
     if (button == 2 && !shift) // F3: tap = FX1 / FX2, hold + jog = which effect
     {
@@ -1829,28 +1753,20 @@ static void functShift(uint8_t state)
     }
 }
 
+// Left / Right: octave; with Shift, the jog mode
+static void leftRight(int8_t dir)
+{
+    shiftHeld() ? CM->cycleJogMode(dir) : CM->changeOctave(dir);
+}
+
 static void functLeft()
 {
-    if (CM->buttons->isButtonPressed(interfaceButtonShift))
-    {
-        CM->cycleJogMode(-1);
-    }
-    else
-    {
-        CM->changeOctave(-1);
-    }
+    leftRight(-1);
 }
 
 static void functRight()
 {
-    if (CM->buttons->isButtonPressed(interfaceButtonShift))
-    {
-        CM->cycleJogMode(1);
-    }
-    else
-    {
-        CM->changeOctave(1);
-    }
+    leftRight(1);
 }
 
 static void functUp()
@@ -1877,7 +1793,7 @@ static void functPlayAction()
         {
             sequencer.recStart();
         }
-        else if (CM->buttons->isButtonPressed(interfaceButtonShift))
+        else if (shiftHeld())
         {
             sequencer.playSong();
         }
@@ -1908,7 +1824,7 @@ static void functRecAction()
 
 static void functParams()
 {
-    if (CM->buttons->isButtonPressed(interfaceButtonShift))
+    if (shiftHeld())
     {
         CM->eventFunct(eventSwitchToPreviousModule, CM, 0, 0);
     }
@@ -1939,9 +1855,7 @@ static void beforePopup()
     CM->releaseAll();
     if (!CM->latch)
     {
-        CM->stopArp();
-        CM->stopRoll();
-        CM->clearChord();
+        CM->dropChord();
     }
 }
 

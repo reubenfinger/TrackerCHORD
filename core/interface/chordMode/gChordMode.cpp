@@ -1,9 +1,7 @@
 #include "chordMode/chordMode.h"
 
 #include <stdio.h>
-#include <string.h>
 
-#include "mtConfig.h"
 #include "mtSequencer.h"
 #include "mtStructs.h"
 #include "patternEditor/patternEditor.h"
@@ -106,31 +104,19 @@ void cChordMode::showFunctionLabels()
     if (shiftLabels)
     {
         snprintf(fnText[0], sizeof(fnText[0]), "Ring %s", ringNames[ringMode]);
-    }
-    else
-    {
-        snprintf(fnText[0], sizeof(fnText[0]), "%s", rowMode == kRowStrum ? "Strum" : "Levels");
-    }
-    if (shiftLabels)
-    {
         snprintf(fnText[1], sizeof(fnText[1]), "Strum %dv", strumVoiceLimit);
         snprintf(fnText[2], sizeof(fnText[2]), "Chord %dv", chordVoiceLimit);
         snprintf(fnText[3], sizeof(fnText[3]), "Rel %s", releaseNames[releaseMode]);
         snprintf(fnText[4], sizeof(fnText[4]), "Gain %d%%", gain);
-    }
-    else
-    {
-        snprintf(fnText[1], sizeof(fnText[1]), "Jog %s", jogNames[jogMode]);
-        snprintf(fnText[2], sizeof(fnText[2]), "FX%d %s", fxSlot + 1, fxShortName());
-        snprintf(fnText[3], sizeof(fnText[3]), "%s", latch ? "Latch On" : "Latch Off");
-        snprintf(fnText[4], sizeof(fnText[4]), "%s", playNames[chordPlay]);
-    }
-    if (shiftLabels)
-    {
         snprintf(fnText[7], sizeof(fnText[7]), "%s", strumWrap ? "Wrap On" : "Wrap Off");
     }
     else
     {
+        snprintf(fnText[0], sizeof(fnText[0]), "%s", rowMode == kRowStrum ? "Strum" : "Levels");
+        snprintf(fnText[1], sizeof(fnText[1]), "Jog %s", jogNames[jogMode]);
+        snprintf(fnText[2], sizeof(fnText[2]), "FX%d %s", fxSlot + 1, fxShortName());
+        snprintf(fnText[3], sizeof(fnText[3]), "%s", latch ? "Latch On" : "Latch Off");
+        snprintf(fnText[4], sizeof(fnText[4]), "%s", playNames[chordPlay]);
         snprintf(fnText[7], sizeof(fnText[7]), "Close");
     }
 
@@ -234,7 +220,7 @@ void cChordMode::showInfo()
              "Pads: %s    Row 4: %s    Velocity %d    Octave %d    Gain %d%%",
              playNames[chordPlay],
              rowMode == kRowStrum ? "Strum" : "Levels",
-             levelVelocity(),
+             noteVelocity,
              octave,
              gain);
 
@@ -245,16 +231,13 @@ void cChordMode::showInfo()
         char slotText[2][28];
         for (uint8_t slot = 0; slot < 2; slot++)
         {
+            char value[8] = "";
             if (fxValue[slot] >= 0)
             {
-                snprintf(slotText[slot], sizeof(slotText[slot]), "%sFX%d %s %d", slot == fxSlot ? ">" : " ",
-                         slot + 1, fxShortName(slot), fxValue[slot]);
+                snprintf(value, sizeof(value), " %d", fxValue[slot]);
             }
-            else
-            {
-                snprintf(slotText[slot], sizeof(slotText[slot]), "%sFX%d %s", slot == fxSlot ? ">" : " ",
-                         slot + 1, fxShortName(slot));
-            }
+            snprintf(slotText[slot], sizeof(slotText[slot]), "%sFX%d %s%s", slot == fxSlot ? ">" : " ",
+                     slot + 1, fxShortName(slot), value);
         }
         snprintf(jogText, sizeof(jogText), "Jog: FX    %s    %s", slotText[0], slotText[1]);
     }

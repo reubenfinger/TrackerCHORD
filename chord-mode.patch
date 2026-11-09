@@ -1,7 +1,23 @@
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/interface/chordMode/chordMode.h" tracker-ce-chord/core/interface/chordMode/chordMode.h
---- a/core/interface/chordMode/chordMode.h	1970-01-01 00:00:00.000000000 +0000
-+++ b/core/interface/chordMode/chordMode.h	2026-11-09 13:04:35.926722114 +0000
-@@ -0,0 +1,347 @@
+diff --git a/core/include/Platform.h b/core/include/Platform.h
+index 1e498c3..74cef1a 100644
+--- a/core/include/Platform.h
++++ b/core/include/Platform.h
+@@ -156,6 +156,9 @@ class Encoder
+   public:
+     virtual void setAcceleration(int acceleration) = 0;
+     virtual void setResolution(int resolution) = 0;
++    // How often the encoder is read, in ms (100 by default). Platforms that do not support
++    // changing it ignore the call.
++    virtual void setReadInterval([[maybe_unused]] uint32_t intervalMs) {}
+ };
+ 
+ class Timer
+diff --git a/core/interface/chordMode/chordMode.h b/core/interface/chordMode/chordMode.h
+new file mode 100644
+index 0000000..c923bfe
+--- /dev/null
++++ b/core/interface/chordMode/chordMode.h
+@@ -0,0 +1,352 @@
 +// Chord mode: an Omnichord-style chord player with an MPC "16 Levels"-style
 +// velocity row, for the Polyend Tracker pad grid.
 +//
@@ -9,7 +25,9 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +//                  row 1 major, row 2 minor, row 3 seventh; Shift + pad: sus4 / m7 / maj7.
 +//   Pad row 4    : Strum (a 12-note strum plate over the held chord) or
 +//                  Levels (12 velocity levels; a pad sets the level and plays the chord).
-+//   Jog          : strum through the chord's notes; turning speed sets the velocity.
++//   Chord pads   : play as Block, Strum, Arp (the sequencer's own Arp effect) or Select.
++//   Jog          : Strum, Strum + velocity, Velocity, or FX (an effect swept live and recorded
++//                  into FX1 / FX2); Shift + jog or Shift + Left / Right picks the mode.
 +//                  Hold F6 + jog: change the track.
 +//
 +// Entered and left with Shift + I.Param. Notes go through Sequencer::handleNoteOn/Off,
@@ -21,6 +39,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +#define INTERFACE_CHORDMODE_H_
 +
 +#include "core/modulesBase.h"
++#include "mtSequencer.h"
 +
 +#include <stdint.h>
 +
@@ -105,7 +124,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        kJogFx = 3,       // move an effect value: heard live, recorded into an FX slot
 +        kJogModes
 +    };
-+    static constexpr uint8_t kJogFxTypes = 9;
++    static constexpr uint8_t kJogFxTypes = 9; // effects F3 + jog steps through (any via FX1 / FX2)
 +
 +    enum RingMode : uint8_t
 +    {
@@ -149,8 +168,8 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    void jogFx(int16_t value);
 +    void changeFxType(int8_t delta);
 +    void toggleFxSlot();
-+    uint8_t fxType() const { return fxType(fxSlot); }
-+    uint8_t fxType(uint8_t slot) const;
++    uint8_t fxType() const { return fxTypeId[fxSlot]; }
++    uint8_t fxType(uint8_t slot) const { return fxTypeId[slot]; }
 +    void applyFxLive(uint8_t slot, int8_t track);
 +    void applyFxToVoices(uint8_t slot);
 +    void clearFxLive(uint8_t slot);
@@ -158,6 +177,12 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    void glideFx();
 +    void recordFxValue();
 +    void setLevel(uint8_t newLevel);
++    void setVelocity(uint8_t newVelocity);
++    void dropChord();
++    void refreshScreen();
++    bool lateInStep() const;
++    Sequencer::strPattern::strTrack::strStep* stepAt(int8_t track, int16_t stepIndex) const;
++    void scheduleArpSubNotes(uint32_t now);
 +    void toggleStrumWrap();
 +    void fxPicked(uint8_t slot, uint8_t type);
 +    const char* fxShortName() const { return fxShortName(fxSlot); }
@@ -190,7 +215,6 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +                        bool previewOnly = false);
 +    void recLanes(uint8_t wanted, int8_t& first, uint8_t& count) const;
 +    uint8_t armedLanes() const;
-+    bool writeChordStep(int16_t stepIndex, uint8_t arpValue, int8_t& trackOut);
 +    void writeOffStep(int8_t track, int16_t stepIndex);
 +    bool writeNoteStep(int8_t track, int16_t stepIndex, uint8_t note, int8_t volume, int8_t micromove);
 +    int8_t recordVolume() const;
@@ -224,7 +248,6 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +
 +    uint8_t buildChordNotes(uint8_t* out, uint8_t maxCount) const;
 +    int16_t strumNote(uint8_t index) const;
-+    uint8_t levelVelocity() const;
 +    uint8_t scaled(uint8_t velocity) const;
 +    bool hasChord() const { return currentRootPc >= 0; }
 +    const char* rootName() const;
@@ -243,15 +266,14 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    //---------------------------------- state
 +    uint8_t rowMode = kRowStrum;
 +    int8_t octave = 3;      // chord roots sit in C(octave) .. B(octave)
-+    uint8_t level = 9;      // 1..12 (nearest to velocity)
-+    uint8_t velocity = 106; // 1..127: what Chord mode plays at (before Gain)
++    uint8_t level = 9;          // 1..12 (Up / Down, the Levels row): sets noteVelocity in twelve steps
++    uint8_t noteVelocity = 106; // 1..127: what Chord mode plays at (before Gain)
 +    uint8_t jogMode = kJogStrumVel;
 +    bool strumWrap = true; // jog strum: past the top note it carries on from the bottom (and back)
-+    // jog FX
 +    // jog FX: each slot (FX1, FX2) has its own effect and value; the jog drives fxSlot
-+    uint8_t fxSlot = 0;                     // 0 = FX1, 1 = FX2
-+    uint8_t fxTypeIdx[2] = { 0, 5 };        // into the jog FX list (FX1 Low-pass, FX2 Reverb)
-+    int16_t fxCustomType[2] = { -1, -1 };   // an effect picked with FX1 / FX2 (any), -1 = the list's
++    uint8_t fxSlot = 0; // 0 = FX1, 1 = FX2
++    uint8_t fxTypeId[2] = { Sequencer::strFxConsts::FX_TYPE_FILTER_LOWPASS,
++                            Sequencer::strFxConsts::FX_TYPE_REVERB_SEND };
 +    int16_t fxValue[2] = { -1, -1 };        // the jog's value (target), -1 = not set yet
 +    int16_t fxLive[2] = { -1, -1 };         // the value heard now, gliding towards fxValue
 +    uint16_t fxLiveTracks[2] = { 0, 0 };    // sample tracks each slot's value is applied to
@@ -288,7 +310,6 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    bool arpRunning = false;
 +    uint8_t arpPad = 255;
 +    int16_t arpIndex = -1;
-+    int8_t arpDir = 1;
 +    uint32_t arpNextMs = 0;
 +    int16_t arpLastPos = -1;   // sequencer step the arpeggio last followed
 +    int16_t arpStepCount = 0;  // pattern steps since the arpeggio started
@@ -312,7 +333,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    uint8_t rollCount = 0;
 +    uint8_t rollPos = 0;
 +    uint32_t rollNextMs = 0;
-+    bool rollPreviewOnly = false; // the roll is recorded as one Arp step, so its live notes are not
++    bool rollPreviewOnly = false; // the roll was written to one lane already, so its live notes are not recorded
 +
 +    int8_t jogPos = -1;
 +    bool jogStarted = false;
@@ -349,24 +370,21 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +extern cChordMode chordMode;
 +
 +#endif /* INTERFACE_CHORDMODE_H_ */
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/interface/chordMode/fChordMode.cpp" tracker-ce-chord/core/interface/chordMode/fChordMode.cpp
---- a/core/interface/chordMode/fChordMode.cpp	1970-01-01 00:00:00.000000000 +0000
-+++ b/core/interface/chordMode/fChordMode.cpp	2026-11-09 13:04:35.953506674 +0000
-@@ -0,0 +1,1997 @@
+diff --git a/core/interface/chordMode/fChordMode.cpp b/core/interface/chordMode/fChordMode.cpp
+new file mode 100644
+index 0000000..9f7082c
+--- /dev/null
++++ b/core/interface/chordMode/fChordMode.cpp
+@@ -0,0 +1,1911 @@
 +#include "chordMode.h"
 +
-+#include <stdio.h>
-+#include <string.h>
-+
 +#include "core/interface.h"
-+#include "core/interfaceMenuPopup.h"
 +#include "core/interfacePopups.h"
 +#include "elapsedMillis.h"
 +#include "fileManager.h"
 +#include "mtAudioEngine.h"
 +#include "mtChordDefs.h"
 +#include "mtConfig.h"
-+#include "mtPadBoard.h"
 +#include "mtPadsBacklight.h"
 +#include "mtSequencer.h"
 +#include "Platform.h"
@@ -381,6 +399,27 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +static elapsedMillis clockMs; // running ms clock for strum ring times
 +
 +static constexpr uint8_t kNoVoice = 255;
++
++// Chord mode's hooks into the sequencer, set only around its own note-on / note-off calls:
++// keep (and record) the played velocity, keep a sample instrument's recording on sample tracks,
++// limit recording to the given lanes, and optionally play without recording.
++static void setSequencerHooks(bool on, int8_t recFirst = -1, uint8_t recCount = 0, bool previewOnly = false)
++{
++    sequencer.liveVelocityAlways = on;
++    sequencer.liveRecSampleTracksOnly = on;
++    sequencer.liveRecFirstTrack = on ? recFirst : -1;
++    sequencer.liveRecTrackCount = on ? recCount : 0;
++    sequencer.livePreviewOnly = on && previewOnly;
++}
++
++static bool shiftHeld()
++{
++    return CM->buttons->isButtonPressed(interfaceButtonShift);
++}
++
++// Arp effect rates (Sequencer::arpPeriod_*): a note every N steps, or N notes per step.
++static const uint8_t arpPeriodSteps[cChordMode::kArpRates] = { 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0 };
++static const uint8_t arpNotesPerStep[cChordMode::kArpRates] = { 0, 0, 0, 0, 0, 0, 2, 3, 4, 6, 8 };
 +
 +//==============================================================================================
 +// Chord tables
@@ -467,7 +506,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    // strum on press: the next note of the roll
 +    if (rollPos < rollCount && static_cast<int32_t>(now - rollNextMs) >= 0)
 +    {
-+        playStrumNote(rollNotes[rollPos++], levelVelocity(), rollPreviewOnly);
++        playStrumNote(rollNotes[rollPos++], noteVelocity, rollPreviewOnly);
 +        rollNextMs = now + kRollSpacingMs;
 +    }
 +
@@ -476,9 +515,6 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    // step. While the pattern plays it follows the sequencer's steps; when stopped, the tempo.
 +    if (arpRunning)
 +    {
-+        static const uint8_t periodSteps[kArpRates] = { 8, 6, 4, 3, 2, 1, 0, 0, 0, 0, 0 };
-+        static const uint8_t notesPerStep[kArpRates] = { 0, 0, 0, 0, 0, 0, 2, 3, 4, 6, 8 };
-+
 +        bool boundary = false;
 +        uint32_t stepLength = sequencer.isPlay() ? stepMs : freeStepMs();
 +
@@ -521,28 +557,17 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +                }
 +            }
 +
-+            if (arpRunning && arpStepCount >= 0)
++            uint8_t n = arpPeriodSteps[arpRate];
++            if (arpRunning && arpStepCount >= 0 && (n == 0 || arpStepCount % n == 0))
 +            {
-+                uint8_t n = periodSteps[arpRate];
-+                if (n > 0)
-+                {
-+                    if (arpStepCount % n == 0)
-+                    {
-+                        arpStep();
-+                    }
-+                }
-+                else
-+                {
-+                    arpStep();
-+                    arpSubLeft = static_cast<uint8_t>(notesPerStep[arpRate] - 1);
-+                    arpSubMs = now + stepLength / notesPerStep[arpRate];
-+                }
++                arpStep();
++                scheduleArpSubNotes(now);
 +            }
 +        }
 +        else if (arpRunning && arpSubLeft > 0 && static_cast<int32_t>(now - arpSubMs) >= 0)
 +        {
 +            arpSubLeft--;
-+            arpSubMs += stepLength / notesPerStep[arpRate];
++            arpSubMs += stepLength / arpNotesPerStep[arpRate];
 +            arpStep();
 +        }
 +    }
@@ -720,16 +745,22 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    return hasChord() ? pitchClassNames[static_cast<uint8_t>(currentRootPc)] : "";
 +}
 +
-+uint8_t cChordMode::levelVelocity() const
-+{
-+    return velocity;
-+}
-+
 +// A level 1..12 (Up / Down, the Levels row) sets the velocity to that step of 127.
 +void cChordMode::setLevel(uint8_t newLevel)
 +{
 +    level = newLevel;
-+    velocity = static_cast<uint8_t>((127 * level + kLevels - 1) / kLevels);
++    noteVelocity = static_cast<uint8_t>((127 * level + kLevels - 1) / kLevels);
++}
++
++// The velocity set directly (jog Velocity mode); the level follows it.
++void cChordMode::setVelocity(uint8_t newVelocity)
++{
++    noteVelocity = newVelocity;
++    level = static_cast<uint8_t>((noteVelocity * kLevels + 63) / 127);
++    if (level < 1)
++    {
++        level = 1;
++    }
 +}
 +
 +uint8_t cChordMode::scaled(uint8_t velocity) const
@@ -801,16 +832,31 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    return lanes;
 +}
 +
++// Past the middle of the current step (while the pattern plays)?
++bool cChordMode::lateInStep() const
++{
++    return sequencer.isPlay() && (nowMs() - seenPosMs) * 2 > stepMs;
++}
++
 +// The step a recording made now lands on: this one, or the next if we are past its middle.
 +int16_t cChordMode::recordPosition() const
 +{
-+    int16_t pos = sequencer.getActualPos();
-+    if (sequencer.isPlay() && (nowMs() - seenPosMs) * 2 > stepMs)
-+    {
-+        pos = static_cast<int16_t>(pos + 1);
-+    }
++    int16_t pos = static_cast<int16_t>(sequencer.getActualPos() + (lateInStep() ? 1 : 0));
 +    int16_t length = sequencer.getPatternLength();
 +    return static_cast<int16_t>(length > 0 ? pos % length : 0);
++}
++
++// A step of the current pattern, the index wrapped round the pattern length (nullptr if none).
++Sequencer::strPattern::strTrack::strStep* cChordMode::stepAt(int8_t track, int16_t stepIndex) const
++{
++    Sequencer::strPattern* pattern = sequencer.getActualPattern();
++    int16_t length = sequencer.getPatternLength();
++    if (pattern == nullptr || length <= 0 || track < 0)
++    {
++        return nullptr;
++    }
++    stepIndex = static_cast<int16_t>(((stepIndex % length) + length) % length);
++    return &pattern->track[track].step[stepIndex];
 +}
 +
 +cChordMode::strVoice cChordMode::startVoice(uint8_t note,
@@ -831,17 +877,9 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    uint8_t previousVoice = engine.getLastUsedVoice();
 +    engine.setLastUsedVoice(kNoVoice);
 +
-+    sequencer.liveVelocityAlways = true;
-+    sequencer.liveRecSampleTracksOnly = true;
-+    sequencer.liveRecFirstTrack = recFirst;
-+    sequencer.liveRecTrackCount = recCount;
-+    sequencer.livePreviewOnly = previewOnly;
++    setSequencerHooks(true, recFirst, recCount, previewOnly);
 +    sequencer.handleNoteOn(Sequencer::GRID_OUTSIDE_PATTERN, note, static_cast<int8_t>(scaled(velocity)), source);
-+    sequencer.liveVelocityAlways = false;
-+    sequencer.liveRecSampleTracksOnly = false;
-+    sequencer.liveRecFirstTrack = -1;
-+    sequencer.liveRecTrackCount = 0;
-+    sequencer.livePreviewOnly = false;
++    setSequencerHooks(false);
 +
 +    uint8_t usedVoice = engine.getLastUsedVoice();
 +    if (usedVoice < kSampleTracks)
@@ -873,13 +911,9 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        return;
 +    }
 +
-+    sequencer.liveRecFirstTrack = voice.recFirst;
-+    sequencer.liveRecTrackCount = voice.recCount;
-+    sequencer.livePreviewOnly = voice.previewOnly;
++    setSequencerHooks(true, voice.recFirst, voice.recCount, voice.previewOnly);
 +    sequencer.handleNoteOff(Sequencer::GRID_OUTSIDE_PATTERN, voice.note, 0, voice.source);
-+    sequencer.liveRecFirstTrack = -1;
-+    sequencer.liveRecTrackCount = 0;
-+    sequencer.livePreviewOnly = false;
++    setSequencerHooks(false);
 +
 +    if (voice.track >= 0 && voice.track < kSampleTracks)
 +    {
@@ -1126,44 +1160,34 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    return static_cast<uint32_t>(60000.0f / tempo / 4.0f);
 +}
 +
-+// Recording: write the whole arpeggio as one step on the selected track - root note, the Chord
-+// effect (the chord) and the Arp effect (direction and rate) - so the sequencer plays it back
-+// itself on one lane, with no extra tracks or voices.
-+// Write root + Chord + Arp effects as one step on the first armed lane.
-+bool cChordMode::writeChordStep(int16_t stepIndex, uint8_t arpValue, int8_t& trackOut)
++// Recording: the whole arpeggio as one step on the first armed lane - root note, the Chord effect
++// (the chord) and the Arp effect (direction and rate) - so the sequencer's own arpeggiator plays it
++// back on one lane, with no extra tracks or voices.
++void cChordMode::recordArpStep(int16_t stepIndex)
 +{
 +    int8_t track;
 +    uint8_t count;
 +    recLanes(1, track, count);
-+    if (count == 0 || track < 0 || !hasChord())
++    Sequencer::strPattern::strTrack::strStep* step = stepAt(track, stepIndex);
++    if (count == 0 || step == nullptr || !hasChord())
 +    {
-+        return false;
++        return;
 +    }
-+
-+    Sequencer::strPattern* pattern = sequencer.getActualPattern();
-+    int16_t length = sequencer.getPatternLength();
-+    if (pattern == nullptr || length <= 0)
-+    {
-+        return false;
-+    }
-+    stepIndex = static_cast<int16_t>(((stepIndex % length) + length) % length);
 +
 +    newFileManager.storePatternUndoRevision();
-+
-+    Sequencer::strPattern::strTrack::strStep& step = pattern->track[track].step[stepIndex];
-+    step.note = static_cast<int8_t>(12 * octave + currentRootPc);
-+    step.instrument = mtProject.values.lastUsedInstrument;
-+
-+    step.volume = recordVolume();
-+
-+    step.fx[0].type = sequencer.fx.FX_TYPE_MIDI_CHORD;
-+    step.fx[0].value = currentChordIdx;
-+    step.fx[1].type = sequencer.fx.FX_TYPE_ARP;
-+    step.fx[1].value = arpValue;
-+
++    step->note = static_cast<int8_t>(12 * octave + currentRootPc);
++    step->instrument = mtProject.values.lastUsedInstrument;
++    step->volume = recordVolume();
++    step->fx[0].type = sequencer.fx.FX_TYPE_MIDI_CHORD;
++    step->fx[0].value = currentChordIdx;
++    step->fx[1].type = sequencer.fx.FX_TYPE_ARP;
++    step->fx[1].value = static_cast<uint8_t>(arpPattern * sequencer.fx.arpPeriodsCount + arpRate + 1);
 +    newFileManager.setActualPatternStructChanged();
-+    trackOut = track;
-+    return true;
++
++    arpRecording = true;
++    arpRecTrack = track;
++    arpRecStep = static_cast<int16_t>(stepIndex % sequencer.getPatternLength());
++    arpLeftRecStep = false;
 +}
 +
 +// Chord mode velocity (level x gain) as a step volume (0..100). Always recorded: what Chord mode
@@ -1172,66 +1196,34 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +{
 +    // as the sequencer does for live notes: the velocity is scaled by the instrument's own
 +    // velocity setting before it becomes a volume, so a recorded step sounds as loud as live
-+    int velocity = scaled(levelVelocity());
 +    int instrumentVelo = sequencer.getInstrumentVelo(mtProject.values.lastUsedInstrument);
-+    velocity = (velocity * instrumentVelo + 63) / 127;
-+    return static_cast<int8_t>((velocity * 100 + 63) / 127);
++    int played = (scaled(noteVelocity) * instrumentVelo + 63) / 127;
++    return static_cast<int8_t>((played * 100 + 63) / 127);
 +}
 +
 +// One note on an empty step (an occupied step is left alone, as live recording does).
 +bool cChordMode::writeNoteStep(int8_t track, int16_t stepIndex, uint8_t note, int8_t volume, int8_t micromove)
 +{
-+    Sequencer::strPattern* pattern = sequencer.getActualPattern();
-+    int16_t length = sequencer.getPatternLength();
-+    if (pattern == nullptr || length <= 0 || track < 0)
++    Sequencer::strPattern::strTrack::strStep* step = stepAt(track, stepIndex);
++    if (step == nullptr || !step->isNoteEmpty() || step->hasAnyFx())
 +    {
 +        return false;
 +    }
-+    stepIndex = static_cast<int16_t>(((stepIndex % length) + length) % length);
-+    Sequencer::strPattern::strTrack::strStep& step = pattern->track[track].step[stepIndex];
-+    if (!step.isNoteEmpty() || step.hasAnyFx())
-+    {
-+        return false;
-+    }
-+    step.note = static_cast<int8_t>(note);
-+    step.instrument = mtProject.values.lastUsedInstrument;
-+    step.volume = volume;
-+    step.micromove = micromove;
++    step->note = static_cast<int8_t>(note);
++    step->instrument = mtProject.values.lastUsedInstrument;
++    step->volume = volume;
++    step->micromove = micromove;
 +    return true;
 +}
 +
 +void cChordMode::writeOffStep(int8_t track, int16_t stepIndex)
 +{
-+    Sequencer::strPattern* pattern = sequencer.getActualPattern();
-+    int16_t length = sequencer.getPatternLength();
-+    if (pattern == nullptr || length <= 0 || track < 0)
++    Sequencer::strPattern::strTrack::strStep* step = stepAt(track, stepIndex);
++    if (step != nullptr && step->isNoteEmpty())
 +    {
-+        return;
-+    }
-+    stepIndex = static_cast<int16_t>(((stepIndex % length) + length) % length);
-+    Sequencer::strPattern::strTrack::strStep& step = pattern->track[track].step[stepIndex];
-+    if (step.isNoteEmpty())
-+    {
-+        step.note = Sequencer::STEP_NOTE_OFF_DEFAULT;
++        step->note = Sequencer::STEP_NOTE_OFF_DEFAULT;
 +        newFileManager.setActualPatternStructChanged();
 +    }
-+}
-+
-+// Recording: the whole arpeggio as one step, so the sequencer's own arpeggiator plays it back.
-+void cChordMode::recordArpStep(int16_t stepIndex)
-+{
-+    int8_t track;
-+    uint8_t value = static_cast<uint8_t>(arpPattern * sequencer.fx.arpPeriodsCount + arpRate + 1);
-+    if (!writeChordStep(stepIndex, value, track))
-+    {
-+        return;
-+    }
-+    stepIndex = static_cast<int16_t>(stepIndex % sequencer.getPatternLength());
-+
-+    arpRecording = true;
-+    arpRecTrack = track;
-+    arpRecStep = stepIndex;
-+    arpLeftRecStep = false;
 +}
 +
 +// Recording: the arpeggio stopped - end the recorded step with a note-off on the step it stopped on.
@@ -1248,61 +1240,47 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    arpRecording = false;
 +}
 +
++// Rates faster than a step: the step's other notes, spread evenly after the one just played.
++void cChordMode::scheduleArpSubNotes(uint32_t now)
++{
++    uint8_t perStep = arpNotesPerStep[arpRate];
++    arpSubLeft = perStep > 1 ? static_cast<uint8_t>(perStep - 1) : 0;
++    if (arpSubLeft > 0)
++    {
++        arpSubMs = now + (sequencer.isPlay() ? stepMs : freeStepMs()) / perStep;
++    }
++}
++
++// Start (or, while running, restart with the new chord / settings). A press in the first half of a
++// step plays at once; a later press waits for the next step, which is also where a recording puts it.
 +void cChordMode::startArp(uint8_t pad)
 +{
 +    arpPad = pad;
-+
-+    // where the arpeggio starts: a press in the first half of a step plays at once, a later
-+    // press waits for the next step (that is also where a recording puts it)
-+    bool late = sequencer.isPlay() && (nowMs() - seenPosMs) * 2 > stepMs;
++    bool late = lateInStep();
 +
 +    if (sequencer.isRec())
 +    {
-+        int16_t pos = sequencer.getActualPos();
-+        recordArpStep(static_cast<int16_t>(late ? pos + 1 : pos));
++        recordArpStep(recordPosition());
 +    }
 +
-+    if (arpRunning || arpHandedOver)
++    if (!arpActive())
 +    {
-+        // a new chord while running: the next note uses it; a recording gets a new step
-+        arpRunning = true;
-+        arpHandedOver = false;
-+        arpIndex = -1;
-+        arpSubLeft = 0;
-+        if (!late)
-+        {
-+            arpStepCount = 0;
-+            arpStep();
-+        }
-+        else
-+        {
-+            arpStepCount = -1;
-+        }
-+        return;
++        arpLastPos = sequencer.getActualPos();
++        arpNextMs = nowMs() + freeStepMs();
 +    }
-+
 +    arpRunning = true;
 +    arpHandedOver = false;
 +    arpIndex = -1;
 +    arpSubLeft = 0;
-+    arpLastPos = sequencer.getActualPos();
-+    arpNextMs = nowMs() + freeStepMs();
 +
 +    if (late)
 +    {
 +        arpStepCount = -1; // the next step boundary counts as step 0 and plays the first note
 +        return;
 +    }
-+
 +    arpStepCount = 0;
 +    arpStep();
-+    static const uint8_t notesPerStep[kArpRates] = { 0, 0, 0, 0, 0, 0, 2, 3, 4, 6, 8 };
-+    if (notesPerStep[arpRate] > 0)
-+    {
-+        uint32_t stepLength = sequencer.isPlay() ? stepMs : freeStepMs();
-+        arpSubLeft = static_cast<uint8_t>(notesPerStep[arpRate] - 1);
-+        arpSubMs = nowMs() + stepLength / notesPerStep[arpRate];
-+    }
++    scheduleArpSubNotes(nowMs());
 +}
 +
 +void cChordMode::stopArp()
@@ -1357,24 +1335,21 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    strVoice previous = arpVoice;
 +    arpSourceB = !arpSourceB;
 +    int16_t source = static_cast<int16_t>(kSrcArp + (arpSourceB ? 1 : 0));
-+    uint8_t arpNote = tones[arpIndex];
-+    bool previewOnly = sequencer.isRec();
-+
-+    if (previous.on && previous.note == arpNote)
-+    {
-+        endVoice(previous);
-+    }
-+    arpVoice = startVoice(arpNote, levelVelocity(), source, -1, 0, previewOnly);
-+    endVoice(previous);
-+    if (!arpVoice.on)
-+    {
-+        arpVoice = startVoice(arpNote, levelVelocity(), source, -1, 0, previewOnly);
-+    }
++    handover(&previous, 1, &tones[arpIndex], &source, 1, noteVelocity, &arpVoice, 1, sequencer.isRec());
 +}
 +
 +//==============================================================================================
 +// Pad, jog and key actions
 +//==============================================================================================
++
++// Let go of the chord altogether: arpeggio, strum on press, ringing strum notes, selection.
++void cChordMode::dropChord()
++{
++    stopArp();
++    stopRoll();
++    releaseStrumNotes();
++    clearChord();
++}
 +
 +void cChordMode::clearChord()
 +{
@@ -1402,7 +1377,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    {
 +        case kPlayBlock:
 +            stopRoll();
-+            playChordBlock(levelVelocity());
++            playChordBlock(noteVelocity);
 +            chordBlockOwnerPad = pad;
 +            break;
 +
@@ -1465,7 +1440,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    {
 +        return;
 +    }
-+    playStrumNote(static_cast<uint8_t>(note), levelVelocity());
++    playStrumNote(static_cast<uint8_t>(note), noteVelocity);
 +    jogPos = static_cast<int8_t>(column);
 +}
 +
@@ -1481,7 +1456,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        }
 +        else if (chordPlay != kPlayArp)
 +        {
-+            playChordBlock(levelVelocity());
++            playChordBlock(noteVelocity);
 +            chordBlockOwnerPad = pad;
 +        }
 +        else if (arpActive() && sequencer.isRec())
@@ -1511,7 +1486,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    }
 +    int8_t dir = value > 0 ? 1 : -1;
 +
-+    if (buttons->isButtonPressed(interfaceButtonShift))
++    if (shiftHeld())
 +    {
 +        cycleJogMode(dir);
 +    }
@@ -1549,12 +1524,6 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    Sequencer::strFxConsts::FX_TYPE_BIT_DEPTH,
 +};
 +
-+uint8_t cChordMode::fxType(uint8_t slot) const
-+{
-+    return fxCustomType[slot] >= 0 ? static_cast<uint8_t>(fxCustomType[slot])
-+                                   : jogFxTypes[fxTypeIdx[slot] % kJogFxTypes];
-+}
-+
 +const char* cChordMode::fxShortName(uint8_t slot) const
 +{
 +    return interfaceGlobals.fxShortNames[interfaceGlobals.fxIdToName(fxType(slot))];
@@ -1566,18 +1535,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +{
 +    clearFxLive(slot);
 +    fxSlot = slot;
-+    fxCustomType[slot] = -1;
-+    for (uint8_t i = 0; i < kJogFxTypes; i++)
-+    {
-+        if (jogFxTypes[i] == type)
-+        {
-+            fxTypeIdx[slot] = i;
-+        }
-+    }
-+    if (jogFxTypes[fxTypeIdx[slot]] != type)
-+    {
-+        fxCustomType[slot] = type;
-+    }
++    fxTypeId[slot] = type;
 +    fxValue[slot] = -1;
 +    jogMode = kJogFx;
 +}
@@ -1590,40 +1548,41 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    }
 +    jogMode = static_cast<uint8_t>((jogMode + kJogModes + delta) % kJogModes);
 +    jogStarted = false;
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +// Velocity mode: two per click, no notes. The level (Up / Down, Levels row) follows it.
 +void cChordMode::jogVelocity(int16_t value)
 +{
-+    int next = velocity + 2 * value;
-+    velocity = static_cast<uint8_t>(next < 1 ? 1 : (next > 127 ? 127 : next));
-+    level = static_cast<uint8_t>((velocity * kLevels + 63) / 127);
-+    if (level < 1)
-+    {
-+        level = 1;
-+    }
++    setVelocity(static_cast<uint8_t>(clamp<int>(noteVelocity + 2 * value, 1, 127)));
 +    showInfo();
 +    lightUpPadBoard();
 +}
 +
++// F3 + jog: the next / previous effect in the jog list (from an effect not in the list: the first).
 +void cChordMode::changeFxType(int8_t delta)
 +{
++    int index = -1;
++    for (uint8_t i = 0; i < kJogFxTypes; i++)
++    {
++        if (jogFxTypes[i] == fxTypeId[fxSlot])
++        {
++            index = i;
++        }
++    }
++    index = index < 0 ? 0 : (index + kJogFxTypes + delta) % kJogFxTypes;
++
 +    clearFxLive(fxSlot);
-+    fxCustomType[fxSlot] = -1;
-+    fxTypeIdx[fxSlot] = static_cast<uint8_t>((fxTypeIdx[fxSlot] + kJogFxTypes + delta) % kJogFxTypes);
++    fxTypeId[fxSlot] = jogFxTypes[index];
 +    fxValue[fxSlot] = -1;
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +// F3 tap: the jog drives the other slot (both keep their effect, value and what is heard)
 +void cChordMode::toggleFxSlot()
 +{
 +    fxSlot = fxSlot ? 0 : 1;
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +// FX mode: about two turns of the jog cover the effect's whole range. The jog sets the target;
@@ -1755,15 +1714,12 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    int8_t lane;
 +    uint8_t count;
 +    recLanes(1, lane, count);
-+    Sequencer::strPattern* pattern = sequencer.getActualPattern();
-+    if (lane < 0 || count == 0 || pattern == nullptr || fxValue[fxSlot] < 0)
++    Sequencer::strPattern::strTrack::strStep* step = stepAt(lane, recordPosition());
++    if (count == 0 || step == nullptr || fxValue[fxSlot] < 0)
 +    {
 +        return;
 +    }
-+
-+    int16_t pos = recordPosition();
-+    Sequencer::strPattern::strTrack::strStep& step = pattern->track[lane].step[pos];
-+    uint8_t held = step.fx[fxSlot].type;
++    uint8_t held = step->fx[fxSlot].type;
 +    if (held == sequencer.fx.FX_TYPE_MIDI_CHORD || held == sequencer.fx.FX_TYPE_ARP)
 +    {
 +        return;
@@ -1774,8 +1730,8 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        newFileManager.storePatternUndoRevision();
 +        fxUndoStored = true;
 +    }
-+    step.fx[fxSlot].type = fxType();
-+    step.fx[fxSlot].value = static_cast<uint8_t>(fxValue[fxSlot]);
++    step->fx[fxSlot].type = fxType();
++    step->fx[fxSlot].value = static_cast<uint8_t>(fxValue[fxSlot]);
 +    newFileManager.setActualPatternStructChanged();
 +}
 +
@@ -1806,14 +1762,13 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +
 +    if (dt > 300 || jogMode == kJogStrum)
 +    {
-+        jogSmoothVelocity = levelVelocity(); // Strum mode: always the current velocity
++        jogSmoothVelocity = noteVelocity; // Strum mode: always the current velocity
 +    }
 +    else
 +    {
 +        jogSmoothVelocity = static_cast<int16_t>((jogSmoothVelocity * 2 + target + 1) / 3);
 +    }
-+    uint8_t velocity = static_cast<uint8_t>(clamp<int>(jogSmoothVelocity, 1, 127));
-+    lastJogVelocity = velocity;
++    lastJogVelocity = static_cast<uint8_t>(clamp<int>(jogSmoothVelocity, 1, 127));
 +
 +    if (steps > 3)
 +    {
@@ -1840,7 +1795,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        int16_t note = strumNote(static_cast<uint8_t>(jogPos));
 +        if (note >= 0)
 +        {
-+            playStrumNote(static_cast<uint8_t>(note), velocity);
++            playStrumNote(static_cast<uint8_t>(note), lastJogVelocity);
 +        }
 +    }
 +
@@ -1857,8 +1812,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +{
 +    rowMode = (rowMode == kRowStrum) ? kRowLevels : kRowStrum;
 +    releaseChordBlock();
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +    lightUpPadBoard();
 +}
 +
@@ -1896,13 +1850,9 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    latch = !latch;
 +    if (!latch && hasChord() && !currentChordPadHeld)
 +    {
-+        stopArp();
-+        stopRoll();
-+        releaseStrumNotes();
-+        clearChord(); // its pad is no longer held
++        dropChord(); // its pad is no longer held
 +    }
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +    lightUpPadBoard();
 +}
 +
@@ -1912,8 +1862,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    stopArp();
 +    stopRoll();
 +    releaseChordBlock();
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +void cChordMode::cycleStrumVoices()
@@ -1927,15 +1876,13 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    {
 +        strumNext = 0;
 +    }
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +void cChordMode::cycleChordVoices()
 +{
 +    chordVoiceLimit = static_cast<uint8_t>(chordVoiceLimit >= 4 ? 2 : chordVoiceLimit + 1); // 2 3 4 2 ...
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +// While recording a running arpeggio, a new direction or rate is written as a new step at that
@@ -1944,13 +1891,11 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +void cChordMode::cycleArpPattern()
 +{
 +    arpPattern = static_cast<uint8_t>((arpPattern + 1) % kArpPatterns);
-+    arpDir = 1;
 +    if (arpActive() && sequencer.isRec() && hasChord())
 +    {
 +        startArp(arpPad);
 +    }
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +void cChordMode::cycleArpRate()
@@ -1960,29 +1905,25 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    {
 +        startArp(arpPad);
 +    }
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +void cChordMode::cycleReleaseMode()
 +{
 +    releaseMode = static_cast<uint8_t>((releaseMode + 1) % kReleaseModes);
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +void cChordMode::cycleRing()
 +{
 +    ringMode = static_cast<uint8_t>((ringMode + 1) % kRingModes);
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +void cChordMode::cycleGain()
 +{
 +    gain = (gain == 100) ? 75 : (gain == 75) ? 50 : 100;
-+    showFunctionLabels();
-+    showInfo();
++    refreshScreen();
 +}
 +
 +// The selected track: where live notes start looking for a free track, and where recording starts.
@@ -2000,6 +1941,12 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        sendSelection();
 +    }
 +    showTrackLabel();
++}
++
++void cChordMode::refreshScreen()
++{
++    showFunctionLabels();
++    showInfo();
 +}
 +
 +void cChordMode::setShiftLabels(bool shift)
@@ -2031,7 +1978,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        if (pressed)
 +        {
 +            padsBacklight.setFrontLayer(1, mtConfig.values.padsLightFront, pad);
-+            CM->chordPadPress(pad, CM->buttons->isButtonPressed(interfaceButtonShift));
++            CM->chordPadPress(pad, shiftHeld());
 +        }
 +        else
 +        {
@@ -2105,7 +2052,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +{
 +    if (button == 5) // F6: hold + jog changes the track; Shift + F6: arpeggio pattern
 +    {
-+        if (state == buttonPress && CM->buttons->isButtonPressed(interfaceButtonShift))
++        if (state == buttonPress && shiftHeld())
 +        {
 +            CM->cycleArpPattern();
 +        }
@@ -2120,7 +2067,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        return;
 +    }
 +
-+    bool shift = CM->buttons->isButtonPressed(interfaceButtonShift);
++    bool shift = shiftHeld();
 +
 +    if (button == 2 && !shift) // F3: tap = FX1 / FX2, hold + jog = which effect
 +    {
@@ -2184,28 +2131,20 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    }
 +}
 +
++// Left / Right: octave; with Shift, the jog mode
++static void leftRight(int8_t dir)
++{
++    shiftHeld() ? CM->cycleJogMode(dir) : CM->changeOctave(dir);
++}
++
 +static void functLeft()
 +{
-+    if (CM->buttons->isButtonPressed(interfaceButtonShift))
-+    {
-+        CM->cycleJogMode(-1);
-+    }
-+    else
-+    {
-+        CM->changeOctave(-1);
-+    }
++    leftRight(-1);
 +}
 +
 +static void functRight()
 +{
-+    if (CM->buttons->isButtonPressed(interfaceButtonShift))
-+    {
-+        CM->cycleJogMode(1);
-+    }
-+    else
-+    {
-+        CM->changeOctave(1);
-+    }
++    leftRight(1);
 +}
 +
 +static void functUp()
@@ -2232,7 +2171,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        {
 +            sequencer.recStart();
 +        }
-+        else if (CM->buttons->isButtonPressed(interfaceButtonShift))
++        else if (shiftHeld())
 +        {
 +            sequencer.playSong();
 +        }
@@ -2263,7 +2202,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +
 +static void functParams()
 +{
-+    if (CM->buttons->isButtonPressed(interfaceButtonShift))
++    if (shiftHeld())
 +    {
 +        CM->eventFunct(eventSwitchToPreviousModule, CM, 0, 0);
 +    }
@@ -2294,9 +2233,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    CM->releaseAll();
 +    if (!CM->latch)
 +    {
-+        CM->stopArp();
-+        CM->stopRoll();
-+        CM->clearChord();
++        CM->dropChord();
 +    }
 +}
 +
@@ -2350,16 +2287,16 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +{
 +    fxKey(1, state);
 +}
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/interface/chordMode/gChordMode.cpp" tracker-ce-chord/core/interface/chordMode/gChordMode.cpp
---- a/core/interface/chordMode/gChordMode.cpp	1970-01-01 00:00:00.000000000 +0000
-+++ b/core/interface/chordMode/gChordMode.cpp	2026-11-09 13:04:35.957371831 +0000
-@@ -0,0 +1,297 @@
+diff --git a/core/interface/chordMode/gChordMode.cpp b/core/interface/chordMode/gChordMode.cpp
+new file mode 100644
+index 0000000..e6d1ba5
+--- /dev/null
++++ b/core/interface/chordMode/gChordMode.cpp
+@@ -0,0 +1,280 @@
 +#include "chordMode/chordMode.h"
 +
 +#include <stdio.h>
-+#include <string.h>
 +
-+#include "mtConfig.h"
 +#include "mtSequencer.h"
 +#include "mtStructs.h"
 +#include "patternEditor/patternEditor.h"
@@ -2462,31 +2399,19 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    if (shiftLabels)
 +    {
 +        snprintf(fnText[0], sizeof(fnText[0]), "Ring %s", ringNames[ringMode]);
-+    }
-+    else
-+    {
-+        snprintf(fnText[0], sizeof(fnText[0]), "%s", rowMode == kRowStrum ? "Strum" : "Levels");
-+    }
-+    if (shiftLabels)
-+    {
 +        snprintf(fnText[1], sizeof(fnText[1]), "Strum %dv", strumVoiceLimit);
 +        snprintf(fnText[2], sizeof(fnText[2]), "Chord %dv", chordVoiceLimit);
 +        snprintf(fnText[3], sizeof(fnText[3]), "Rel %s", releaseNames[releaseMode]);
 +        snprintf(fnText[4], sizeof(fnText[4]), "Gain %d%%", gain);
-+    }
-+    else
-+    {
-+        snprintf(fnText[1], sizeof(fnText[1]), "Jog %s", jogNames[jogMode]);
-+        snprintf(fnText[2], sizeof(fnText[2]), "FX%d %s", fxSlot + 1, fxShortName());
-+        snprintf(fnText[3], sizeof(fnText[3]), "%s", latch ? "Latch On" : "Latch Off");
-+        snprintf(fnText[4], sizeof(fnText[4]), "%s", playNames[chordPlay]);
-+    }
-+    if (shiftLabels)
-+    {
 +        snprintf(fnText[7], sizeof(fnText[7]), "%s", strumWrap ? "Wrap On" : "Wrap Off");
 +    }
 +    else
 +    {
++        snprintf(fnText[0], sizeof(fnText[0]), "%s", rowMode == kRowStrum ? "Strum" : "Levels");
++        snprintf(fnText[1], sizeof(fnText[1]), "Jog %s", jogNames[jogMode]);
++        snprintf(fnText[2], sizeof(fnText[2]), "FX%d %s", fxSlot + 1, fxShortName());
++        snprintf(fnText[3], sizeof(fnText[3]), "%s", latch ? "Latch On" : "Latch Off");
++        snprintf(fnText[4], sizeof(fnText[4]), "%s", playNames[chordPlay]);
 +        snprintf(fnText[7], sizeof(fnText[7]), "Close");
 +    }
 +
@@ -2590,7 +2515,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +             "Pads: %s    Row 4: %s    Velocity %d    Octave %d    Gain %d%%",
 +             playNames[chordPlay],
 +             rowMode == kRowStrum ? "Strum" : "Levels",
-+             levelVelocity(),
++             noteVelocity,
 +             octave,
 +             gain);
 +
@@ -2601,16 +2526,13 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +        char slotText[2][28];
 +        for (uint8_t slot = 0; slot < 2; slot++)
 +        {
++            char value[8] = "";
 +            if (fxValue[slot] >= 0)
 +            {
-+                snprintf(slotText[slot], sizeof(slotText[slot]), "%sFX%d %s %d", slot == fxSlot ? ">" : " ",
-+                         slot + 1, fxShortName(slot), fxValue[slot]);
++                snprintf(value, sizeof(value), " %d", fxValue[slot]);
 +            }
-+            else
-+            {
-+                snprintf(slotText[slot], sizeof(slotText[slot]), "%sFX%d %s", slot == fxSlot ? ">" : " ",
-+                         slot + 1, fxShortName(slot));
-+            }
++            snprintf(slotText[slot], sizeof(slotText[slot]), "%sFX%d %s%s", slot == fxSlot ? ">" : " ",
++                     slot + 1, fxShortName(slot), value);
 +        }
 +        snprintf(jogText, sizeof(jogText), "Jog: FX    %s    %s", slotText[0], slotText[1]);
 +    }
@@ -2651,9 +2573,10 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
 +    display.refreshControl(hintLabel);
 +    display.refreshControl(jogLabel);
 +}
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/interface/core/interface.cpp" tracker-ce-chord/core/interface/core/interface.cpp
---- a/core/interface/core/interface.cpp	2026-11-02 13:50:52.000000000 +0000
-+++ b/core/interface/core/interface.cpp	2026-11-08 19:58:26.886111113 +0000
+diff --git a/core/interface/core/interface.cpp b/core/interface/core/interface.cpp
+index fbebd91..b79cd67 100644
+--- a/core/interface/core/interface.cpp
++++ b/core/interface/core/interface.cpp
 @@ -9,6 +9,7 @@
  #include "core/songTimer.h"
  #include "core/titleBar.h"
@@ -2662,7 +2585,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
  #include "imageViewer/imageViewer.h"
  #include "instrumentEditor/instrumentEditor.h"
  #include "masterParams/masterParams.h"
-@@ -567,6 +568,15 @@
+@@ -567,6 +568,15 @@ void interfaceEnvents(uint8_t event, void* param1, void* param2, void* param3)
      {
          case eventSwitchModule:
          {
@@ -2678,7 +2601,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
              // param1 = uchwyt do modułu, param2 = index przycisku
              mtInterface.switchModuleByButton(
                (hModule)param1, *((uint8_t*)param2), param3 == nullptr ? 0 : *((uint32_t*)param3));
-@@ -583,6 +593,12 @@
+@@ -583,6 +593,12 @@ void interfaceEnvents(uint8_t event, void* param1, void* param2, void* param3)
          {
              break;
          }
@@ -2691,10 +2614,11 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
          case eventActivateImageViewer:
          {
              mtInterface.deactivateModule((hModule)param1);
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/interface/core/interfaceDefs.h" tracker-ce-chord/core/interface/core/interfaceDefs.h
---- a/core/interface/core/interfaceDefs.h	2026-11-02 13:50:52.000000000 +0000
-+++ b/core/interface/core/interfaceDefs.h	2026-11-08 19:58:26.879060297 +0000
-@@ -269,6 +269,7 @@
+diff --git a/core/interface/core/interfaceDefs.h b/core/interface/core/interfaceDefs.h
+index a45089c..90622fe 100644
+--- a/core/interface/core/interfaceDefs.h
++++ b/core/interface/core/interfaceDefs.h
+@@ -269,6 +269,7 @@ enum interfaceEvents
      eventToggleActiveModule,
  
      eventActivateImageViewer,
@@ -2702,10 +2626,11 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
      eventActivateGameModule,
  
      eventSetFileTransferMode,
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/interface/instrumentEditor/fIinstrEdit.cpp" tracker-ce-chord/core/interface/instrumentEditor/fIinstrEdit.cpp
---- a/core/interface/instrumentEditor/fIinstrEdit.cpp	2026-11-02 13:50:52.000000000 +0000
-+++ b/core/interface/instrumentEditor/fIinstrEdit.cpp	2026-11-08 19:58:26.896830376 +0000
-@@ -983,6 +983,12 @@
+diff --git a/core/interface/instrumentEditor/fIinstrEdit.cpp b/core/interface/instrumentEditor/fIinstrEdit.cpp
+index d6d25f2..cee92c5 100644
+--- a/core/interface/instrumentEditor/fIinstrEdit.cpp
++++ b/core/interface/instrumentEditor/fIinstrEdit.cpp
+@@ -983,6 +983,12 @@ static void functSwitchModule(uint8_t button)
  
  static void functSwitchMode()
  {
@@ -2718,10 +2643,11 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
      mtPopups.hideInfoPopup();
      sequencer.stopManualNotes();
  
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/source/mtSequencer.cpp" tracker-ce-chord/core/source/mtSequencer.cpp
---- a/core/source/mtSequencer.cpp	2026-11-02 13:50:52.000000000 +0000
-+++ b/core/source/mtSequencer.cpp	2026-11-09 12:09:00.818907015 +0000
-@@ -2554,7 +2554,7 @@
+diff --git a/core/source/mtSequencer.cpp b/core/source/mtSequencer.cpp
+index 84552fd..3cf8427 100644
+--- a/core/source/mtSequencer.cpp
++++ b/core/source/mtSequencer.cpp
+@@ -2554,7 +2554,7 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
    int8_t velocity, // 0-127, historyczna wartosc specjalna -1 jest tozsama z 127
    int16_t source)  // nr pada, jesli midi to source = nuta+100,
  {
@@ -2730,7 +2656,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
      {
          velocity = 127;
      }
-@@ -2620,11 +2620,18 @@
+@@ -2620,11 +2620,18 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
              engine.setLastUsedVoice(sel->firstTrack);
          }
      }
@@ -2750,7 +2676,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
  
          if (singleArmedTrack >= 0)
          {
-@@ -2666,6 +2673,12 @@
+@@ -2666,6 +2673,12 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
  
          for (int tr = startTrack; tr < endTrack; tr++)
          {
@@ -2763,7 +2689,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
              uint8_t destinationStep = isAnticipatedBeat1 ? 0 : getDestRecordingStep(tr, !recMicrotiming());
  
              strPattern::strTrack::strStep* step = &currentPattern->track[tr].step[destinationStep];
-@@ -2681,7 +2694,8 @@
+@@ -2681,7 +2694,8 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
               * spr warunek wejscia w track
               */
              bool isPrerollPreviewOnly = player.preRecMetronomeActive && !isAnticipatedBeat1;
@@ -2773,7 +2699,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
              {
                  if (singleArmedTrack < 0 && player.track[tr].noteOpen && !padInstrumentEdit)
                  {
-@@ -2738,7 +2752,7 @@
+@@ -2738,7 +2752,7 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
                          wasChangeInPattern = true;
                      }
  
@@ -2782,7 +2708,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
                      {
                          step->volume = velocityToVolume(velocity);
                          wasChangeInPattern = true;
-@@ -2841,7 +2855,7 @@
+@@ -2841,7 +2855,7 @@ AUDIO_CORE_FLASH void Sequencer::handleNoteOn(
  
                      wasChangeInPattern = true;
  
@@ -2791,7 +2717,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
                      {
                          step->volume = velocityToVolume(velocity);
                      }
-@@ -2895,9 +2909,13 @@
+@@ -2895,9 +2909,13 @@ void Sequencer::handleNoteOff(byte channel, // pochodzenie grida np. GRID_OUTSID
              }
          }
      }
@@ -2806,10 +2732,11 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
          if (singleArmedTrack >= 0)
          {
              for (uint8_t i = 0; i < liveRecHeldNotesCount; i++)
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/source/mtSequencer.h" tracker-ce-chord/core/source/mtSequencer.h
---- a/core/source/mtSequencer.h	2026-11-02 13:50:52.000000000 +0000
-+++ b/core/source/mtSequencer.h	2026-11-09 12:09:00.829996439 +0000
-@@ -897,6 +897,18 @@
+diff --git a/core/source/mtSequencer.h b/core/source/mtSequencer.h
+index 8748aca..ed53b6e 100644
+--- a/core/source/mtSequencer.h
++++ b/core/source/mtSequencer.h
+@@ -897,6 +897,18 @@ class Sequencer
  
      void handleNoteOn(byte channel, byte pitch, int8_t volume, int16_t source);
      void handleNoteOff(byte channel, byte pitch, byte volume, int16_t source);
@@ -2828,23 +2755,11 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
      void updateTrackLengths(strPattern* pattern);
  
      uint8_t noMoreRecOpen();
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/core/include/Platform.h" tracker-ce-chord/core/include/Platform.h
---- a/core/include/Platform.h	2026-11-02 13:50:52.000000000 +0000
-+++ b/core/include/Platform.h	2026-11-08 22:45:30.763678429 +0000
-@@ -156,6 +156,9 @@
-   public:
-     virtual void setAcceleration(int acceleration) = 0;
-     virtual void setResolution(int resolution) = 0;
-+    // How often the encoder is read, in ms (100 by default). Platforms that do not support
-+    // changing it ignore the call.
-+    virtual void setReadInterval([[maybe_unused]] uint32_t intervalMs) {}
- };
- 
- class Timer
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/platforms/mk66/source/EncoderImpl.cpp" tracker-ce-chord/platforms/mk66/source/EncoderImpl.cpp
---- a/platforms/mk66/source/EncoderImpl.cpp	2026-11-02 13:50:52.000000000 +0000
-+++ b/platforms/mk66/source/EncoderImpl.cpp	2026-11-08 22:45:30.795593901 +0000
-@@ -14,6 +14,11 @@
+diff --git a/platforms/mk66/source/EncoderImpl.cpp b/platforms/mk66/source/EncoderImpl.cpp
+index aadac6d..fceb3cd 100644
+--- a/platforms/mk66/source/EncoderImpl.cpp
++++ b/platforms/mk66/source/EncoderImpl.cpp
+@@ -14,6 +14,11 @@ void EncoderImpl::setResolution(int resolution)
      encoderDriver.setResolution(resolution);
  }
  
@@ -2856,7 +2771,7 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
  void EncoderImpl::init()
  {
      encoderDriver.begin();
-@@ -23,7 +28,7 @@
+@@ -23,7 +28,7 @@ void EncoderImpl::init()
  
  void EncoderImpl::update()
  {
@@ -2865,10 +2780,11 @@ diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-
      {
          encTimer = millis();
  
-diff -ruN -x .DS_Store "2026-10-06 Tracker/referenced-chatgpt-conversation-this-is-an/outputs/Firmwares/tracker-ce-main/platforms/mk66/source/EncoderImpl.h" tracker-ce-chord/platforms/mk66/source/EncoderImpl.h
---- a/platforms/mk66/source/EncoderImpl.h	2026-11-02 13:50:52.000000000 +0000
-+++ b/platforms/mk66/source/EncoderImpl.h	2026-11-08 22:45:30.789910471 +0000
-@@ -8,12 +8,14 @@
+diff --git a/platforms/mk66/source/EncoderImpl.h b/platforms/mk66/source/EncoderImpl.h
+index b4e8281..79834c4 100644
+--- a/platforms/mk66/source/EncoderImpl.h
++++ b/platforms/mk66/source/EncoderImpl.h
+@@ -8,12 +8,14 @@ class EncoderImpl : Encoder
    public:
      virtual void setAcceleration(int acceleration) override;
      virtual void setResolution(int resolution) override;

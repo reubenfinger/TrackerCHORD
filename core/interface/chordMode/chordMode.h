@@ -5,7 +5,9 @@
 //                  row 1 major, row 2 minor, row 3 seventh; Shift + pad: sus4 / m7 / maj7.
 //   Pad row 4    : Strum (a 12-note strum plate over the held chord) or
 //                  Levels (12 velocity levels; a pad sets the level and plays the chord).
-//   Jog          : strum through the chord's notes; turning speed sets the velocity.
+//   Chord pads   : play as Block, Strum, Arp (the sequencer's own Arp effect) or Select.
+//   Jog          : Strum, Strum + velocity, Velocity, or FX (an effect swept live and recorded
+//                  into FX1 / FX2); Shift + jog or Shift + Left / Right picks the mode.
 //                  Hold F6 + jog: change the track.
 //
 // Entered and left with Shift + I.Param. Notes go through Sequencer::handleNoteOn/Off,
@@ -17,6 +19,7 @@
 #define INTERFACE_CHORDMODE_H_
 
 #include "core/modulesBase.h"
+#include "mtSequencer.h"
 
 #include <stdint.h>
 
@@ -101,7 +104,7 @@ class cChordMode : public ModuleBase
         kJogFx = 3,       // move an effect value: heard live, recorded into an FX slot
         kJogModes
     };
-    static constexpr uint8_t kJogFxTypes = 9;
+    static constexpr uint8_t kJogFxTypes = 9; // effects F3 + jog steps through (any via FX1 / FX2)
 
     enum RingMode : uint8_t
     {
@@ -145,8 +148,8 @@ class cChordMode : public ModuleBase
     void jogFx(int16_t value);
     void changeFxType(int8_t delta);
     void toggleFxSlot();
-    uint8_t fxType() const { return fxType(fxSlot); }
-    uint8_t fxType(uint8_t slot) const;
+    uint8_t fxType() const { return fxTypeId[fxSlot]; }
+    uint8_t fxType(uint8_t slot) const { return fxTypeId[slot]; }
     void applyFxLive(uint8_t slot, int8_t track);
     void applyFxToVoices(uint8_t slot);
     void clearFxLive(uint8_t slot);
@@ -154,6 +157,12 @@ class cChordMode : public ModuleBase
     void glideFx();
     void recordFxValue();
     void setLevel(uint8_t newLevel);
+    void setVelocity(uint8_t newVelocity);
+    void dropChord();
+    void refreshScreen();
+    bool lateInStep() const;
+    Sequencer::strPattern::strTrack::strStep* stepAt(int8_t track, int16_t stepIndex) const;
+    void scheduleArpSubNotes(uint32_t now);
     void toggleStrumWrap();
     void fxPicked(uint8_t slot, uint8_t type);
     const char* fxShortName() const { return fxShortName(fxSlot); }
@@ -186,7 +195,6 @@ class cChordMode : public ModuleBase
                         bool previewOnly = false);
     void recLanes(uint8_t wanted, int8_t& first, uint8_t& count) const;
     uint8_t armedLanes() const;
-    bool writeChordStep(int16_t stepIndex, uint8_t arpValue, int8_t& trackOut);
     void writeOffStep(int8_t track, int16_t stepIndex);
     bool writeNoteStep(int8_t track, int16_t stepIndex, uint8_t note, int8_t volume, int8_t micromove);
     int8_t recordVolume() const;
@@ -220,7 +228,6 @@ class cChordMode : public ModuleBase
 
     uint8_t buildChordNotes(uint8_t* out, uint8_t maxCount) const;
     int16_t strumNote(uint8_t index) const;
-    uint8_t levelVelocity() const;
     uint8_t scaled(uint8_t velocity) const;
     bool hasChord() const { return currentRootPc >= 0; }
     const char* rootName() const;
@@ -239,15 +246,14 @@ class cChordMode : public ModuleBase
     //---------------------------------- state
     uint8_t rowMode = kRowStrum;
     int8_t octave = 3;      // chord roots sit in C(octave) .. B(octave)
-    uint8_t level = 9;      // 1..12 (nearest to velocity)
-    uint8_t velocity = 106; // 1..127: what Chord mode plays at (before Gain)
+    uint8_t level = 9;          // 1..12 (Up / Down, the Levels row): sets noteVelocity in twelve steps
+    uint8_t noteVelocity = 106; // 1..127: what Chord mode plays at (before Gain)
     uint8_t jogMode = kJogStrumVel;
     bool strumWrap = true; // jog strum: past the top note it carries on from the bottom (and back)
-    // jog FX
     // jog FX: each slot (FX1, FX2) has its own effect and value; the jog drives fxSlot
-    uint8_t fxSlot = 0;                     // 0 = FX1, 1 = FX2
-    uint8_t fxTypeIdx[2] = { 0, 5 };        // into the jog FX list (FX1 Low-pass, FX2 Reverb)
-    int16_t fxCustomType[2] = { -1, -1 };   // an effect picked with FX1 / FX2 (any), -1 = the list's
+    uint8_t fxSlot = 0; // 0 = FX1, 1 = FX2
+    uint8_t fxTypeId[2] = { Sequencer::strFxConsts::FX_TYPE_FILTER_LOWPASS,
+                            Sequencer::strFxConsts::FX_TYPE_REVERB_SEND };
     int16_t fxValue[2] = { -1, -1 };        // the jog's value (target), -1 = not set yet
     int16_t fxLive[2] = { -1, -1 };         // the value heard now, gliding towards fxValue
     uint16_t fxLiveTracks[2] = { 0, 0 };    // sample tracks each slot's value is applied to
@@ -284,7 +290,6 @@ class cChordMode : public ModuleBase
     bool arpRunning = false;
     uint8_t arpPad = 255;
     int16_t arpIndex = -1;
-    int8_t arpDir = 1;
     uint32_t arpNextMs = 0;
     int16_t arpLastPos = -1;   // sequencer step the arpeggio last followed
     int16_t arpStepCount = 0;  // pattern steps since the arpeggio started
@@ -308,7 +313,7 @@ class cChordMode : public ModuleBase
     uint8_t rollCount = 0;
     uint8_t rollPos = 0;
     uint32_t rollNextMs = 0;
-    bool rollPreviewOnly = false; // the roll is recorded as one Arp step, so its live notes are not
+    bool rollPreviewOnly = false; // the roll was written to one lane already, so its live notes are not recorded
 
     int8_t jogPos = -1;
     bool jogStarted = false;
